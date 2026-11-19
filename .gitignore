@@ -1,0 +1,41 @@
+.venv/
+__pycache__/
+.pytest_cache/
+data/
+web/node_modules/
+web/dist/
+web/test-results/
+web/playwright-report/
+*.log
+.env
+
+# Secrets et configuration locale
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Modèles, bases et fichiers temporaires
+models/
+*.gguf
+*.onnx
+*.onnx_data
+*.safetensors
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.pid
+*.tsbuildinfo
+.coverage
+htmlcov/
+
+# Profils de navigateur
+web/.edge-profile/
+web/.browser-profile/
+
+# Rapports et captures locaux pouvant contenir des documents personnels
+docs/*.json
+docs/*.png
+!docs/summary-fast-coverage.png
