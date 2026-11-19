@@ -72,6 +72,11 @@ def get(doc, translation_id):
     result = dict(row)
     result['warnings'] = json.loads(result['warnings'])
     result['language_name'] = LANGUAGES[result['language']][0]
+    with db() as c:
+        result['devices'] = [dict(r) for r in c.execute('''
+            SELECT json_extract(metrics,'$.device') device, count(*) blocks
+            FROM translation_blocks WHERE translation=? AND text IS NOT NULL
+            AND json_extract(metrics,'$.device') IS NOT NULL GROUP BY device''', (translation_id,))]
     return result
 
 

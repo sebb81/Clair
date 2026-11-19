@@ -12,7 +12,7 @@ test('Traduction : langue, progression, export et reprise après rechargement',a
     if(url.pathname.endsWith('/messages')) return route.fulfill({json:[]})
     if(url.pathname.endsWith('/translations')) return route.fulfill({json:{languages:{en:'Anglais',fr:'Français',de:'Allemand'},translations:jobs}})
     if(url.pathname.endsWith('/translate')) {
-      expect(route.request().postDataJSON()).toEqual({model,language:'de',webnn_device:'cpu'})
+      expect(route.request().postDataJSON()).toEqual({model,language:'de',webnn_device:'npu'})
       const partial={id:'job-ui',model,language:'de',language_name:'Allemand',completed:1,total:2,status:'running',warnings:['Traduction à relire.'],error:''}
       jobs=[{...partial,completed:2,status:'complete'}]
       return route.fulfill({contentType:'application/x-ndjson',body:[{type:'translation_progress',translation:partial},{type:'translation_done',translation:jobs[0]}].map(x=>JSON.stringify(x)).join('\n')+'\n'})
@@ -21,6 +21,8 @@ test('Traduction : langue, progression, export et reprise après rechargement',a
   })
   await page.goto('/')
   await page.locator('.doc-item').click()
+  await page.getByRole('button',{name:'Paramètres du modèle'}).click()
+  await page.getByLabel('Calcul WebNN').selectOption('npu')
   await page.getByRole('button',{name:'Traduire',exact:true}).click()
   await page.getByLabel('Langue de traduction').selectOption('de')
   await page.getByRole('button',{name:'Traduire le document',exact:true}).click()

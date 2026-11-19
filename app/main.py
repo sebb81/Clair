@@ -120,7 +120,12 @@ class BrowserResult(BaseModel):
     output_tokens: int = Field(default=0, ge=0, le=webnn.MAX_CONTEXT)
     done_reason: str = Field(default='stop', pattern='^(stop|length)$')
     dispatches: int = Field(default=0, ge=0)
-    device: str = Field(default='gpu', pattern='^(gpu|cpu)$')
+    device: str = Field(default='cpu', pattern='^(gpu|cpu|npu)$')
+    device_preference: str = Field(default='auto', pattern='^(auto|gpu|cpu|npu)$')
+    device_attempts: list[dict] = Field(default_factory=list, max_length=3)
+    device_verification: str = Field(default='webnn-context-and-generation', max_length=80)
+    hardware_identity_verified: bool = False
+    accelerator_check_ms: float = Field(default=0, ge=0)
     gpu_check_ms: float = Field(default=0, ge=0)
     gpu_fallback_ms: float = Field(default=0, ge=0)
     load_ms: float = Field(default=0, ge=0)
@@ -264,7 +269,7 @@ class Question(BaseModel):
     strategy: str = Field(default='auto', pattern='^(auto|fast|direct|summary|hybrid|bm25|section)$')
     output_format: str = Field(default='réponse détaillée', pattern='^(réponse courte|réponse détaillée|résumé structuré|points clés)$')
     prepare_only: bool = False
-    webnn_device: str = Field(default='auto', pattern='^(auto|cpu)$')
+    webnn_device: str = Field(default='auto', pattern='^(auto|cpu|gpu|npu)$')
 
 
 @app.post('/api/documents/{doc}/ask')
@@ -340,7 +345,7 @@ async def browser_response(model, device, operation):
 class TranslationRequest(BaseModel):
     language: str = Field(pattern='^(en|fr|es|de|it|pt|nl)$')
     model: str = Field(min_length=1, max_length=120)
-    webnn_device: str = Field(default='cpu', pattern='^(auto|cpu)$')
+    webnn_device: str = Field(default='auto', pattern='^(auto|cpu|gpu|npu)$')
 
 
 @app.get('/api/documents/{doc}/translations')

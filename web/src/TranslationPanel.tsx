@@ -1,16 +1,16 @@
 import {useEffect, useRef, useState} from 'react'
 import {Download, Languages, LoaderCircle, Square} from 'lucide-react'
-import {generateInBrowser} from './browser-generation'
+import {deviceLabels,generateInBrowser,type DeviceReport,type DeviceSelection} from './browser-generation'
 
-type Translation = {id:string;language:string;language_name:string;model:string;status:string;total:number;completed:number;warnings:string[];error:string}
-type Props = {docId:string;model:string;modelName:string;ready:boolean;busy:boolean;onBusyChange:(busy:boolean)=>void}
+type Translation = {id:string;language:string;language_name:string;model:string;status:string;total:number;completed:number;warnings:string[];error:string;devices?:{device:string;blocks:number}[]}
+type Props = {docId:string;model:string;modelName:string;device:DeviceSelection;onDeviceReport:(report:DeviceReport|null)=>void;ready:boolean;busy:boolean;onBusyChange:(busy:boolean)=>void}
 async function responseJson(response:Response) {
   const value = await response.json()
   if (!response.ok) throw Error(value.detail || 'Erreur de traduction locale.')
   return value
 }
 
-export function TranslationPanel({docId,model,modelName,ready,busy,onBusyChange}:Props) {
+export function TranslationPanel({docId,model,modelName,device,onDeviceReport,ready,busy,onBusyChange}:Props) {
   const [language,setLanguage] = useState('en')
   const [languages,setLanguages] = useState<Record<string,string>>({})
   const [jobs,setJobs] = useState<Translation[]>([])
@@ -38,13 +38,14 @@ export function TranslationPanel({docId,model,modelName,ready,busy,onBusyChange}
     const abort = new AbortController()
     controller.current = abort
     onBusyChange(true)
+    onDeviceReport(null)
     setError('')
     setStatus('Préparation du texte à traduire…')
     let complete = false
     async function event(item:any) {
       if (item.type==='error') throw Error(item.message)
       if (item.type==='status') setStatus(item.text)
-      if (item.type==='generate') await generateInBrowser(item,abort.signal,setStatus,'cpu')
+      if (item.type==='generate') onDeviceReport(await generateInBrowser(item,abort.signal,setStatus,device))
       if (item.type==='translation_progress' || item.type==='translation_done') {
         setJobs(old=>[item.translation,...old.filter(job=>job.id!==item.translation.id)])
         if (item.type==='translation_done') {complete=true;setStatus('Traduction terminée.')}
@@ -53,7 +54,7 @@ export function TranslationPanel({docId,model,modelName,ready,busy,onBusyChange}
     try {
       const response = await fetch(`/api/documents/${docId}/translate`,{
         method:'POST',headers:{'Content-Type':'application/json'},signal:abort.signal,
-        body:JSON.stringify({language,model,webnn_device:'cpu'}),
+        body:JSON.stringify({language,model,webnn_device:device}),
       })
       if (!response.ok) await responseJson(response)
       const reader = response.body!.getReader()
@@ -92,7 +93,8 @@ export function TranslationPanel({docId,model,modelName,ready,busy,onBusyChange}
           <Languages size={17}/>{current?.status==='complete'?'Traduction terminée':current && current.completed>0?'Reprendre la traduction':'Traduire le document'}
         </button>}
     </div>
-    <p className="translation-runtime">{modelName || 'Choisissez un modèle dans les paramètres'} · calcul local sur CPU</p>
+    <p className="translation-runtime">{modelName || 'Choisissez un modèle dans les paramètres'} · {deviceLabels[device]}</p>
+    {!!current?.devices?.length&&<p className="translation-runtime">Contextes des blocs déjà calculés : {current.devices.map(item=>`${item.device.toUpperCase()} (${item.blocks})`).join(', ')}. Ces blocs sont conservés à la reprise.</p>}
     {!ready&&<p className="warning">Ouvrez Clair avec demarrer.bat et sélectionnez un modèle WebNN installé.</p>}
     {error&&<p role="alert" className="translation-error">{error}</p>}
     <div aria-live="polite" className="translation-progress">

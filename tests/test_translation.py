@@ -158,9 +158,10 @@ def test_wordless_unicode_split_preserves_every_character():
     assert all(len(p.encode('utf-8')) <= 240 for p in parts)
 
 
-def test_api_translation_download_lock_validation_and_delete(imported, translator, monkeypatch):
+@pytest.mark.parametrize('device', ['auto', 'cpu', 'gpu', 'npu'])
+def test_api_translation_download_lock_validation_and_delete(imported, translator, monkeypatch, device):
     async def generate(self, messages, *args):
-        assert self.device == 'cpu'
+        assert self.device == device
         assert 'into English' in messages[0]['content']
         return await echo(messages)
     monkeypatch.setattr(webnn.Browser, 'generate', generate)
@@ -175,7 +176,7 @@ def test_api_translation_download_lock_validation_and_delete(imported, translato
             assert client.post(url+'/translate', json={'model': webnn.QWEN3, 'language': 'en'}).status_code == 409
         finally:
             compute_lock.release()
-        response = client.post(url+'/translate', json={'model': webnn.QWEN3, 'language': 'en'})
+        response = client.post(url+'/translate', json={'model': webnn.QWEN3, 'language': 'en', 'webnn_device': device})
         events = [json.loads(line) for line in response.text.splitlines()]
         assert events[-1]['type'] == 'translation_done'
         job = events[-1]['translation']
@@ -218,3 +219,39 @@ def test_disconnect_cancels_pending_browser_request_and_releases_lock(imported, 
         assert not compute_lock.locked()
         assert translation.history(imported['id'])[0]['status'] == 'paused'
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('preference', ['auto', 'cpu', 'gpu', 'npu'])
+@pytest.mark.parametrize('prepare', [False, True])
+def test_questions_and_summary_preparation_share_device_preference(imported, translator, monkeypatch, preference, prepare):
+    from app import engine
+    async def answer(*args):
+        assert webnn.ACTIVE.get().device == preference
+        yield {'type': 'done', 'answer': 'Fait.', 'sources': [], 'metrics': {}}
+    async def prepare_summary(*args, **kwargs):
+        assert webnn.ACTIVE.get().device == preference
+    monkeypatch.setattr(engine, 'answer', answer)
+    monkeypatch.setattr(engine, 'prepare', prepare_summary)
+    with TestClient(app) as client:
+        response = client.post(f"/api/documents/{imported['id']}/ask", json={
+            'question': 'Résume le document.', 'model': webnn.QWEN3,
+            'webnn_device': preference, 'prepare_only': prepare})
+    events = [json.loads(line) for line in response.text.splitlines()]
+    assert events[-1]['type'] == ('prepared' if prepare else 'done')
+    assert not compute_lock.locked()
+
+
+def test_resuming_translation_can_mix_preserved_cpu_and_new_npu_blocks(imported, translator):
+    calls = 0
+    async def cpu_then_pause(messages, *args):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise asyncio.CancelledError()
+        return {**await echo(messages), 'device': 'cpu'}
+    with pytest.raises(asyncio.CancelledError):
+        run_translation(imported['id'], generate=cpu_then_pause)
+    async def npu(messages, *args):
+        return {**await echo(messages), 'device': 'npu'}
+    job = run_translation(imported['id'], generate=npu)[-1]['translation']
+    assert job['devices'] == [{'device': 'cpu', 'blocks': 1}, {'device': 'npu', 'blocks': job['total'] - 1}]

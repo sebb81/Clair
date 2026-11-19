@@ -356,7 +356,7 @@ async def _answer(doc, question, model, strategy='auto', output_format='détaill
     generation_question = (question + '\n' + FAST_POLICY
                            if chosen == 'fast' and (not using_webnn or model == webnn.QWEN3) else question)
     browser = webnn.ACTIVE.get()
-    device_key = ('webnn-cpu',) if browser and browser.device == 'cpu' else ()
+    device_key = ('webnn-device-v2', browser.device) if browser else ()
     cache_key = fingerprint('answer-v4', FAST_POLICY, selection.VERSION, summary.VERSION, llm.TRANSPORT_VERSION, llm.COMPACT_SYSTEM,
                             doc, digest, model, question, strategy, generation_format,
                             response_tokens, settings.context, settings.summary_context,

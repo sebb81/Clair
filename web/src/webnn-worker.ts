@@ -16,7 +16,7 @@ type Request = {
   context: number
   max_tokens: number
   json_output: boolean
-  device: 'gpu' | 'cpu'
+  device: 'gpu' | 'cpu' | 'npu'
   model?: ModelProfile
 }
 
@@ -216,22 +216,23 @@ async function generate({messages, context, max_tokens, json_output, device, mod
 
 self.onmessage = async ({data}: MessageEvent<Request>) => {
   try {
-    let gpuCheckMs = 0
-    if (data.device === 'gpu' && !verified) {
+    let acceleratorCheckMs = 0
+    if (data.device !== 'cpu' && !verified) {
       const started = performance.now()
-      report('Vérification du modèle sur le GPU…')
+      report(`Vérification du modèle sur ${data.device.toUpperCase()}…`)
       const check = await generate({...data,
         messages: [{role: 'user', content: 'Count from 1 to 10. Only write the numbers.'}],
         max_tokens: 56, json_output: false,
       }, true)
       if (check.text.match(/\d+/g)?.join(' ') !== '1 2 3 4 5 6 7 8 9 10') {
-        throw Error('Le test de génération du GPU a échoué.')
+        throw Error(`Le test de génération ${data.device.toUpperCase()} a échoué.`)
       }
       verified = true
-      gpuCheckMs = performance.now() - started
+      acceleratorCheckMs = performance.now() - started
     }
     const result = await generate(data)
-    self.postMessage({type: 'result', result: {...result, gpu_check_ms: gpuCheckMs}})
+    self.postMessage({type: 'result', result: {...result, accelerator_check_ms: acceleratorCheckMs,
+      gpu_check_ms: data.device === 'gpu' ? acceleratorCheckMs : 0}})
   } catch (error) {
     self.postMessage({type: 'error', message: error instanceof Error ? error.message : String(error)})
   }

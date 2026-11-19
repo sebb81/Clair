@@ -210,7 +210,9 @@ async def generate(model, question, evidence, output_format, reserve, schema):
     yield {'type': 'token', 'text': text}
     metrics = {key: result[key] for key in ('done_reason', 'prompt_tokens', 'output_tokens', 'dispatches',
                                             'load_ms', 'prompt_evaluation_ms', 'output_generation_ms',
-                                            'device', 'gpu_check_ms', 'gpu_fallback_ms')}
+                                            'device', 'gpu_check_ms', 'gpu_fallback_ms') if key in result}
+    metrics.update({key: result[key] for key in ('device_preference', 'device_attempts',
+                    'device_verification', 'hardware_identity_verified', 'accelerator_check_ms') if key in result})
     metrics.update(runtime='webnn', model=model, context=spec.context,
                    model_calls=1, generation_ms=(time.perf_counter() - started) * 1000)
     llm.record(metrics, model)

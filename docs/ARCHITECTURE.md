@@ -6,7 +6,13 @@ Relecture du **18 novembre 2026**, fondée sur le code local. Pour une explicati
 
 React/TypeScript affiche l'interface. FastAPI sert l'interface et les routes `/api` sur `127.0.0.1:8765`. SQLite conserve texte, index, synthèses et historique. La génération dans Clair passe exclusivement par WebNN dans Edge. Le code Ollama est réservé aux scripts de comparaison historiques.
 
-Le moteur Python prépare les passages et demande la génération au navigateur dans le flux de réponse. Le worker Edge utilise ONNX Runtime Web. Le mode automatique teste la génération WebNN sur GPU puis utilise WebNN sur CPU si l'essai échoue. Chaque modèle utilise son tokenizer et son contexte. Qwen3 4B utilise 3 072 tokens et les deux modèles plus légers utilisent 2 048 tokens. Python valide la structure et les identifiants des citations. Les clés de cache incluent le modèle et sa version.
+Le moteur Python prépare les passages et demande la génération au navigateur dans le flux de réponse. Le worker Edge utilise ONNX Runtime Web. Le même réglage matériel sert aux questions, résumés, préparations et traductions. Automatique : NPU → GPU → CPU ; GPU prioritaire : GPU → NPU → CPU ; NPU prioritaire : NPU → GPU → CPU ; CPU uniquement : CPU. Chaque modèle utilise son tokenizer et son contexte. Qwen3 4B utilise 3 072 tokens et les deux modèles plus légers utilisent 2 048 tokens. Python valide la structure et les identifiants des citations. Les clés de cache incluent le modèle et sa version.
+
+Le worker crée réellement le contexte via `navigator.ml.createContext({deviceType})`, compile les deux sessions ONNX, puis vérifie la génération des nombres 1 à 10 avant de valider un accélérateur. Un échec entraîne sa fermeture et l'essai du périphérique suivant. Chaque tentative d'accélérateur est limitée à 120 secondes ; le budget global reste inférieur aux 900 secondes du serveur. Les échecs sont mémorisés dans `sessionStorage` par profil et contexte, et peuvent être réinitialisés dans les paramètres. Le worker est réutilisé pour les blocs suivants sur le contexte retenu.
+
+Les métriques conservent `device_preference`, `device`, `device_attempts`, `accelerator_check_ms`, `dispatches` et `device_verification`. `hardware_identity_verified` reste faux : une demande `deviceType` et des exécutions WebNN ne suffisent pas à établir l'identité de la puce ou la répartition intégrale des opérateurs. Les métriques restent liées à chaque appel ; une réponse en cache n'est pas une nouvelle exécution. Le cache des réponses distingue les quatre préférences. Les synthèses et les traductions terminées restent réutilisables pour éviter leur recalcul.
+
+Le choix CPU/GPU/NPU correspond aux options de la version d'ONNX Runtime Web intégrée ([référence ONNX Runtime](https://onnxruntime.ai/docs/api/js/interfaces/InferenceSession.WebNNContextOptions.html)). L'[API WebNN reste en évolution](https://www.w3.org/TR/webnn/#dictdef-mlcontextoptions) : la disponibilité d'un contexte et la compatibilité d'un modèle doivent être testées dans le navigateur utilisé.
 
 La recherche utilise SQLite FTS5 et son classement BM25. Il n'y a ni embeddings, ni base vectorielle, ni recherche Web. Le modèle reçoit du texte ; aucun outil shell ou navigateur ne lui est exposé.
 
@@ -27,7 +33,7 @@ La recherche utilise SQLite FTS5 et son classement BM25. Il n'y a ni embeddings,
 
 ## Traduction locale ajoutée le 19 novembre 2026
 
-`POST /api/documents/{doc}/translate` partage le verrou de calcul et le transport NDJSON/WebNN des questions. La traduction utilise son propre prompt, sans consigne de réponse française ni limite de résumé à 200 mots. L'interface demande explicitement le CPU. Les langues cibles sont validées par l'API ; la langue d'origine est laissée à la détection du modèle.
+`POST /api/documents/{doc}/translate` partage le verrou de calcul et le transport NDJSON/WebNN des questions. La traduction utilise son propre prompt, sans consigne de réponse française ni limite de résumé à 200 mots. L'interface transmet le réglage matériel commun et traite les mêmes événements de génération que le chat. Les langues cibles sont validées par l'API ; la langue d'origine est laissée à la détection du modèle.
 
 `translation.py` parcourt `pages.text` dans l'ordre, plutôt que les fragments sélectionnés ou les synthèses. Le tokenizer local découpe les pages en blocs courts, en conservant les caractères et les titres reconnus. Le budget réserve le framing ChatML et jusqu'à 1 024 tokens de sortie dans le contexte du modèle. Une sortie vide ou tronquée entraîne un découpage persistant du bloc, avec une limite de cinq subdivisions ; un échec persistant arrête le traitement.
 

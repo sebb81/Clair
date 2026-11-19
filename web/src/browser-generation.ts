@@ -1,82 +1,109 @@
 import type {ModelProfile} from './webnn-worker'
 
-export type DeviceSelection = 'auto' | 'cpu'
-type Generation = {
-  id: string; messages: {role: string; content: string}[]
-  context: number; max_tokens: number; json_output: boolean
-  model: ModelProfile | null
+export type Device = 'cpu' | 'gpu' | 'npu'
+export type DeviceSelection = 'auto' | Device
+export type DeviceAttempt = {device:Device;status:'failed'|'skipped'|'used';duration_ms:number;error?:string}
+export type DeviceReport = {preference:DeviceSelection;device:Device;attempts:DeviceAttempt[];dispatches:number}
+export const deviceLabels:Record<DeviceSelection,string> = {
+  auto:'Automatique (NPU → GPU → CPU)',npu:'NPU prioritaire',gpu:'GPU prioritaire',cpu:'CPU uniquement',
 }
-let worker: Worker | undefined
-let workerModel: string | undefined
+export function storedDevice():DeviceSelection {
+  const stored=localStorage.getItem('clair-webnn-device')
+  return stored==='cpu'||stored==='gpu'||stored==='npu'?stored:'auto'
+}
+type Generation = {
+  id:string; messages:{role:string;content:string}[]
+  context:number; max_tokens:number; json_output:boolean; model:ModelProfile|null
+}
+let worker:Worker|undefined
+let workerModel:string|undefined
+const checkPrefix='clair-webnn-device-v2:'
 
 export function releaseBrowserModel() {
   worker?.terminate()
-  worker = undefined
-  workerModel = undefined
+  worker=undefined
+  workerModel=undefined
+}
+export function resetDeviceChecks() {
+  releaseBrowserModel()
+  for(const key of Object.keys(sessionStorage)) if(key.startsWith(checkPrefix))sessionStorage.removeItem(key)
+}
+function plan(preference:DeviceSelection):Device[] {
+  if(preference==='cpu')return ['cpu']
+  if(preference==='gpu')return ['gpu','npu','cpu']
+  return ['npu','gpu','cpu']
 }
 
-function run(request: Generation, device: 'gpu' | 'cpu', signal: AbortSignal, status: (text: string) => void) {
+function run(request:Generation,device:Device,signal:AbortSignal,status:(text:string)=>void,timeout:number) {
   signal.throwIfAborted()
-  return new Promise<Record<string, unknown>>((resolve, reject) => {
-    worker ??= new Worker(new URL('./webnn-worker.ts', import.meta.url), {type: 'module'})
-    const current = worker
-    const cleanup = () => {
-      current.onmessage = null
-      current.onerror = null
-      signal.removeEventListener('abort', abort)
+  return new Promise<Record<string,any>>((resolve,reject)=>{
+    worker??=new Worker(new URL('./webnn-worker.ts',import.meta.url),{type:'module'})
+    const current=worker
+    let timer:ReturnType<typeof setTimeout>
+    const cleanup=()=>{
+      clearTimeout(timer)
+      current.onmessage=null
+      current.onerror=null
+      signal.removeEventListener('abort',abort)
     }
-    const abort = () => {
+    const fail=(error:string)=>{cleanup();releaseBrowserModel();resolve({error})}
+    const abort=()=>{cleanup();releaseBrowserModel();reject(signal.reason)}
+    current.onmessage=({data})=>{
+      if(data.type==='status')return status(data.text)
       cleanup()
-      current.terminate()
-      worker = undefined
-      reject(signal.reason)
+      if(data.type==='error'){releaseBrowserModel();resolve({error:data.message})}
+      else resolve(data.result)
     }
-    current.onmessage = ({data}) => {
-      if (data.type === 'status') return status(data.text)
-      cleanup()
-      if (data.type === 'error') {
-        current.terminate()
-        worker = undefined
-      }
-      resolve(data.type === 'result' ? data.result : {error: data.message})
-    }
-    current.onerror = (event) => {
-      cleanup()
-      current.terminate()
-      worker = undefined
-      resolve({error: event.message || 'Échec de démarrage du moteur WebNN.'})
-    }
-    signal.addEventListener('abort', abort, {once: true})
-    current.postMessage({...request, model: request.model ?? undefined, device})
+    current.onerror=event=>fail(event.message||'Échec de démarrage du moteur WebNN.')
+    signal.addEventListener('abort',abort,{once:true})
+    timer=setTimeout(()=>fail(`Le calcul WebNN ${device.toUpperCase()} dépasse le délai autorisé.`),timeout)
+    current.postMessage({...request,model:request.model??undefined,device})
   })
 }
 
-export async function generateInBrowser(request: Generation, signal: AbortSignal, status: (text: string) => void,
-                                        preference: DeviceSelection) {
-  const model = request.model?.id || ''
-  const gpuCheck = model ? `clair-webnn-gpu-check:${model}` : 'clair-webnn-gpu-check'
-  const device = preference === 'cpu' || sessionStorage.getItem(gpuCheck) === 'failed' ? 'cpu' : 'gpu'
-  const runtime = model + ':' + device
-  if (workerModel !== runtime) {
-    worker?.terminate()
-    worker = undefined
-    workerModel = runtime
+export async function generateInBrowser(request:Generation,signal:AbortSignal,status:(text:string)=>void,
+                                        preference:DeviceSelection):Promise<DeviceReport> {
+  // Cache failed compilations per model and context, so long jobs do not retry every block.
+  const signature=JSON.stringify([request.model,request.context])
+  const attempts:DeviceAttempt[]=[]
+  const started=performance.now()
+  let result:Record<string,any>={error:'Aucun périphérique WebNN disponible.'}
+  let selected:Device='cpu'
+  for(const device of plan(preference)) {
+    signal.throwIfAborted()
+    const checkKey=checkPrefix+signature+':'+device
+    const failure=device!=='cpu'?sessionStorage.getItem(checkKey):null
+    if(failure){attempts.push({device,status:'skipped',duration_ms:0,error:failure});continue}
+    const runtime=signature+':'+device
+    if(workerModel!==runtime){releaseBrowserModel();workerModel=runtime}
+    const attemptStart=performance.now()
+    const remaining=880000-(attemptStart-started)
+    if(remaining<=0){result={error:'Délai global du calcul WebNN dépassé.'};break}
+    status(`Essai WebNN sur ${device.toUpperCase()}…`)
+    result=await run(request,device,signal,status,Math.min(remaining,device==='cpu'?880000:120000))
+    signal.throwIfAborted()
+    if(!result.error&&(!result.dispatches||result.device!==device))
+      result={error:'Le moteur n’a pas confirmé une exécution WebNN pour ce contexte.'}
+    if(result.error){
+      const error=String(result.error).slice(0,2000)
+      attempts.push({device,status:'failed',duration_ms:performance.now()-attemptStart,error})
+      if(device!=='cpu')sessionStorage.setItem(checkKey,error)
+      releaseBrowserModel()
+      status(`${device.toUpperCase()} indisponible ou incompatible avec ce modèle. Essai du périphérique suivant…`)
+      continue
+    }
+    selected=device
+    attempts.push({device,status:'used',duration_ms:performance.now()-attemptStart})
+    break
   }
-  const started = performance.now()
-  let result = await run(request, device, signal, status)
-  if (result.error && device === 'gpu') {
-    sessionStorage.setItem(gpuCheck, 'failed')
-    workerModel = model + ':cpu'
-    status('GPU WebNN non validé. Nouvelle tentative avec WebNN sur CPU…')
-    const failedGpuMs = performance.now() - started
-    result = {...await run(request, 'cpu', signal, status), gpu_fallback_ms: failedGpuMs}
-  }
-  signal.throwIfAborted()
-  const response = await fetch('/api/webnn/results/' + request.id, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(result),
-    signal,
+  const report:DeviceReport={preference,device:selected,attempts,dispatches:result.dispatches??0}
+  result={...result,device_preference:preference,device_attempts:attempts,
+          device_verification:'webnn-context-and-generation',hardware_identity_verified:false}
+  const response=await fetch('/api/webnn/results/'+request.id,{
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(result),signal,
   })
-  if (!response.ok) throw Error('Le calcul WebNN a été interrompu.')
+  if(!response.ok)throw Error('Le calcul WebNN a été interrompu.')
+  if(result.error)throw Error(attempts.map(a=>`${a.device.toUpperCase()} : ${a.error}`).join(' · ')||result.error)
+  status(`Génération WebNN validée avec le contexte ${selected.toUpperCase()}.`)
+  return report
 }
