@@ -1,0 +1,8 @@
+[
+  {"question":"Quel est le budget annoncé pour 2027 ?","answer_contains":["240","000"],"pdf_page":2},
+  {"question":"Qui est la responsable du projet ?","answer_contains":["Nadia Martin"],"pdf_page":1},
+  {"question":"Quels sont les risques identifiés ?","answer_contains":["scanner","archiviste"],"pdf_page":3},
+  {"question":"Quel est le taux de TVA ?","expected":"information introuvable"},
+  {"question":"Quel est le budget pour 2099 ?","expected":"information introuvable"},
+  {"question":"Résume le document.","coverage":["objectif","budget","risques","décisions"]}
+]

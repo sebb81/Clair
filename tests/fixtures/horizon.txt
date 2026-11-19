@@ -1,0 +1,19 @@
+# Chapitre 1 - Objectif
+Le projet Horizon modernise les archives municipales.
+La responsable est Nadia Martin.
+Le comite decide un pilote en mars 2027.
+
+# Chapitre 2 - Budget
+Le budget annonce pour 2027 est de 240 000 euros.
+Equipement : 90 000 euros. Formation : 50 000 euros.
+Numerisation : 100 000 euros.
+
+# Chapitre 3 - Risques
+Risques identifies : retard de livraison des scanners
+et indisponibilite des archivistes.
+Le deploiement est prevu en septembre 2027.
+
+# Chapitre 4 - Decisions
+Decisions : revue mensuelle des couts et sauvegarde locale quotidienne.
+Le prestataire reste a selectionner.
+Aucun nom de fournisseur ni taux de TVA ne sont indiques.
