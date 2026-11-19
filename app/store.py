@@ -60,6 +60,18 @@ def initialize():
         CREATE TABLE IF NOT EXISTS llm_calls (
             id INTEGER PRIMARY KEY, run TEXT, doc TEXT REFERENCES documents(id) ON DELETE CASCADE,
             model TEXT, metrics TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS translations (
+            id TEXT PRIMARY KEY, doc TEXT REFERENCES documents(id) ON DELETE CASCADE,
+            language TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'paused',
+            warnings TEXT NOT NULL DEFAULT '[]', error TEXT NOT NULL DEFAULT '',
+            created TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS translation_blocks (
+            translation TEXT REFERENCES translations(id) ON DELETE CASCADE,
+            position TEXT NOT NULL, page INTEGER NOT NULL, source TEXT NOT NULL,
+            heading INTEGER NOT NULL DEFAULT 0, text TEXT, metrics TEXT,
+            PRIMARY KEY(translation, position));
+        CREATE INDEX IF NOT EXISTS translations_doc ON translations(doc);
+        UPDATE translations SET status='paused' WHERE status='running';
         ''')
 
 

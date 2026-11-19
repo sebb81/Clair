@@ -21,7 +21,19 @@ La recherche utilise SQLite FTS5 et son classement BM25. Il n'y a ni embeddings,
 | [token_budget.py](../app/token_budget.py) | Compteur BPE issu du vocabulaire GGUF installé ; borne en octets pour les autres cas. |
 | [llm.py](../app/llm.py) | Validation du modèle, prompts, appel Ollama, flux et métriques natives. |
 | [config.py](../app/config.py) | Contextes, limites de fichiers, threads et maintien des poids en mémoire. |
+| [translation.py](../app/translation.py) | Parcours intégral du texte extrait, traduction par blocs, reprise persistante et export DOCX. |
+| [TranslationPanel.tsx](../web/src/TranslationPanel.tsx) | Langue cible, progression, arrêt, reprise et téléchargement de la traduction. |
 | [main.tsx](../web/src/main.tsx) | Bibliothèque, conversation, choix du mode, progression, couverture et sources. |
+
+## Traduction locale ajoutée le 19 novembre 2026
+
+`POST /api/documents/{doc}/translate` partage le verrou de calcul et le transport NDJSON/WebNN des questions. La traduction utilise son propre prompt, sans consigne de réponse française ni limite de résumé à 200 mots. L'interface demande explicitement le CPU. Les langues cibles sont validées par l'API ; la langue d'origine est laissée à la détection du modèle.
+
+`translation.py` parcourt `pages.text` dans l'ordre, plutôt que les fragments sélectionnés ou les synthèses. Le tokenizer local découpe les pages en blocs courts, en conservant les caractères et les titres reconnus. Le budget réserve le framing ChatML et jusqu'à 1 024 tokens de sortie dans le contexte du modèle. Une sortie vide ou tronquée entraîne un découpage persistant du bloc, avec une limite de cinq subdivisions ; un échec persistant arrête le traitement.
+
+`translations` conserve la langue, le modèle, les avertissements et l'état ; `translation_blocks` conserve l'ordre, le repère source, le texte d'origine, la traduction et les métriques de chaque bloc réussi. La clé dépend du document, de la langue cible, du profil/version du modèle, du contexte et de la version du prompt. Les blocs réussis sont réutilisés à la reprise. Une interruption marque la traduction en pause ; les travaux restés actifs après un arrêt brutal sont remis en pause à l'initialisation. La suppression d'un document supprime aussi ses traductions par clés étrangères.
+
+`GET /api/documents/{doc}/translations` liste les langues et les traductions enregistrées. `GET /api/documents/{doc}/translations/{id}/download` vérifie l'appartenance au document et refuse un traitement incomplet. L'export DOCX est produit en mémoire avec python-docx, déjà installé, avec des repères de pages ou de blocs. Il ne reconstruit ni les images ni la disposition des tableaux. La complétude du parcours n'est pas un contrôle sémantique de fidélité.
 
 ## Import et extraction
 

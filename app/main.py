@@ -1,10 +1,11 @@
 import asyncio
 import hashlib
+import io
 import json
 import uuid
 from contextlib import aclosing, asynccontextmanager
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from anyio import CancelScope
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -13,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import engine, llm, webnn
+from . import engine, llm, translation, webnn
 from .config import settings
 from .extract import extract
 from .store import db, document, initialize
@@ -269,41 +270,49 @@ class Question(BaseModel):
 @app.post('/api/documents/{doc}/ask')
 async def ask(doc: str, body: Question):
     document(doc)
-    if body.model not in webnn.MODELS:
+
+    async def operation(browser):
+        if body.prepare_only:
+            with llm.trace(doc):
+                digest = await llm.validate_model(body.model)
+                progress = {}
+                preparation = asyncio.create_task(engine.prepare(doc, body.model, digest, progress=progress))
+                try:
+                    while not preparation.done():
+                        await asyncio.wait({preparation}, timeout=1)
+                        if progress and not preparation.done():
+                            await browser.events.put({'type': 'status', 'text':
+                                f"{progress.get('stage', 'Préparation')} · "
+                                f"{progress.get('stage_completed', 0)}/{progress.get('stage_total', '?')} lots"})
+                    preparation.result()
+                finally:
+                    preparation.cancel()
+                    await asyncio.gather(preparation, return_exceptions=True)
+            await browser.events.put({'type': 'prepared'})
+        else:
+            async with aclosing(engine.answer(doc, body.question, body.model, body.strategy, body.output_format)) as response:
+                async for event in response:
+                    await browser.events.put(event)
+
+    return await browser_response(body.model, body.webnn_device, operation)
+
+
+async def browser_response(model, device, operation):
+    if model not in webnn.MODELS:
         raise HTTPException(400, 'Choisissez un modèle WebNN dans Clair.')
-    if not webnn.MODELS[body.model].installed():
+    if not webnn.MODELS[model].installed():
         raise HTTPException(400, 'Le modèle WebNN choisi doit être installé.')
     if compute_lock.locked():
         raise HTTPException(409, 'Un calcul est en cours. Arrêtez-le ou attendez sa fin.')
     await compute_lock.acquire()
 
     async def browser_stream():
-        browser = webnn.Browser(body.webnn_device, body.model)
+        browser = webnn.Browser(device, model)
 
         async def run():
             context = webnn.ACTIVE.set(browser)
             try:
-                if body.prepare_only:
-                    with llm.trace(doc):
-                        digest = await llm.validate_model(body.model)
-                        progress = {}
-                        preparation = asyncio.create_task(engine.prepare(doc, body.model, digest, progress=progress))
-                        try:
-                            while not preparation.done():
-                                await asyncio.wait({preparation}, timeout=1)
-                                if progress and not preparation.done():
-                                    await browser.events.put({'type': 'status', 'text':
-                                        f"{progress.get('stage', 'Préparation')} · "
-                                        f"{progress.get('stage_completed', 0)}/{progress.get('stage_total', '?')} lots"})
-                            preparation.result()
-                        finally:
-                            preparation.cancel()
-                            await asyncio.gather(preparation, return_exceptions=True)
-                    await browser.events.put({'type': 'prepared'})
-                else:
-                    async with aclosing(engine.answer(doc, body.question, body.model, body.strategy, body.output_format)) as response:
-                        async for event in response:
-                            await browser.events.put(event)
+                await operation(browser)
             except Exception as exc:
                 await browser.events.put({'type': 'error', 'message': str(exc)})
             finally:
@@ -326,6 +335,41 @@ async def ask(doc: str, body: Question):
 
     return StreamingResponse(browser_stream(), media_type='application/x-ndjson',
                              headers={'Cache-Control': 'no-store'})
+
+
+class TranslationRequest(BaseModel):
+    language: str = Field(pattern='^(en|fr|es|de|it|pt|nl)$')
+    model: str = Field(min_length=1, max_length=120)
+    webnn_device: str = Field(default='cpu', pattern='^(auto|cpu)$')
+
+
+@app.get('/api/documents/{doc}/translations')
+def translations(doc: str):
+    return {'languages': {key: names[0] for key, names in translation.LANGUAGES.items()},
+            'translations': translation.history(doc)}
+
+
+@app.post('/api/documents/{doc}/translate')
+async def translate(doc: str, body: TranslationRequest):
+    document(doc)
+
+    async def operation(browser):
+        async with aclosing(translation.translate(doc, body.language, body.model)) as events:
+            async for event in events:
+                await browser.events.put(event)
+
+    return await browser_response(body.model, body.webnn_device, operation)
+
+
+@app.get('/api/documents/{doc}/translations/{translation_id}/download')
+def translation_download(doc: str, translation_id: str):
+    content = translation.export_docx(doc, translation_id)
+    job = translation.get(doc, translation_id)
+    name = Path(document(doc)['name']).stem + f"-{job['language']}.docx"
+    return StreamingResponse(io.BytesIO(content),
+                             media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                             headers={'Content-Disposition': "attachment; filename*=UTF-8''" + quote(name),
+                                      'Cache-Control': 'no-store'})
 
 
 @app.delete('/api/documents/{doc}')

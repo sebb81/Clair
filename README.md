@@ -26,6 +26,16 @@ Pour ajouter **Qwen3 4B** sur un autre poste, exécutez `.\scripts\installer-web
 
 ## Utilisation
 
+### Traduire un document
+
+Après importation, cliquez sur **Traduire**, choisissez la langue d'arrivée puis **Traduire le document**. Langues proposées : anglais, français, espagnol, allemand, italien, portugais et néerlandais. La langue d'origine est détectée par le modèle. Le modèle choisi dans les paramètres traduit localement dans Edge, sur **CPU**.
+
+Clair parcourt **tout le texte extrait**, dans l'ordre des pages ou des blocs, sans utiliser les résumés ni la recherche de passages. La progression indique les blocs terminés. **Arrêter la traduction** conserve ces blocs ; relancer avec la même langue et le même modèle reprend le travail manquant, y compris après redémarrage. Une réponse tronquée est redécoupée en passages plus courts ; si le modèle n'aboutit pas, l'erreur est affichée et l'export complet reste indisponible.
+
+Une fois la traduction terminée, cliquez sur **Télécharger la traduction en DOCX**. Le fichier conserve des repères de pages ou de blocs sources et les titres reconnaissables. Il ne reproduit pas la mise en page originale, les images ou les tableaux complexes. Les pages scannées nécessitent un OCR avant importation ; les avertissements d'extraction accompagnent le résultat. La traduction automatique doit être relue : le parcours de tous les blocs ne prouve pas la fidélité de chaque phrase. Les langues proposées demandent une validation adaptée aux documents utilisés.
+
+### Questions et résumés
+
 - Importation PDF, DOCX, TXT encodé UTF-8, limite par défaut 100 Mo. Scans : avertissement, OCR à ajouter.
 - Résumé, points importants, risques et décisions par les boutons rapides.
 - Paramètres en haut à droite : modèle installé et stratégie automatique, résumé rapide, lecture directe, résumé approfondi, résumé + BM25 ou recherche BM25. Les demandes de résumé en mode automatique utilisent désormais le mode rapide.

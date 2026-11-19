@@ -8,6 +8,12 @@ Clair permet d'importer un PDF, un document Word ou un fichier texte, puis de po
 
 L'application choisit les passages à fournir au modèle selon la demande. Elle ne lui demande pas systématiquement de lire le document entier. C'est ce choix qui permet de réduire le travail sur CPU.
 
+### Traduction du document
+
+L'onglet **Traduire** suit un parcours distinct : il utilise tout le texte extrait des pages, dans l'ordre, sans sélection BM25 ni résumé intermédiaire. Le modèle reçoit des passages courts et une consigne de traduction intégrale dans la langue choisie. Le calcul utilise WebNN sur CPU. Chaque passage terminé est enregistré dans SQLite pour reprendre après un arrêt. Si une sortie est tronquée, le passage est divisé puis retenté ; une erreur persistante bloque l'export complet.
+
+Le résultat se télécharge en DOCX, avec les repères de pages ou de blocs sources et les titres reconnus. Les avertissements de l'extraction restent présents : une page scannée sans texte ne peut pas être traduite. Le fichier original et l'historique des questions sont conservés. La mise en page et les images ne sont pas reconstruites. Ce parcours vérifie que tous les blocs ont reçu une sortie terminée ; il ne valide pas automatiquement la qualité de la traduction.
+
 ## Du fichier à la réponse
 
 ```mermaid

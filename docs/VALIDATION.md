@@ -1,5 +1,17 @@
 # Validation actuelle et limites connues
 
+## Traduction documentaire ajoutée le 19 novembre 2026
+
+Les tests Python couvrent le parcours ordonné de toutes les pages, la conservation des caractères sources lors du découpage, les titres reconnus, l'arrêt et la reprise sans recalcul des blocs réussis, la séparation des caches par langue/modèle/version, les réponses vides ou tronquées, l'export DOCX complet, les avertissements OCR, le redémarrage et la suppression des traductions avec leur document. Un test de déconnexion pendant une demande WebNN vérifie aussi l'annulation de la demande et la libération du verrou partagé.
+
+Les tests d'interface avec API simulée couvrent le choix de langue, l'envoi explicite sur CPU, la progression, le lien d'export, le rechargement, l'erreur et la reprise. Les affichages bureau et mobile ont été inspectés ; le test mobile contrôle aussi l'absence de débordement horizontal. Ces simulations ne prouvent pas la qualité du modèle.
+
+Un essai réel dans Edge avec **Qwen3 4B sur CPU** a importé un TXT synthétique en français et téléchargé le résultat anglais en DOCX. Le fichier obtenu contient : « The budget is 240,000 euros. The launch is scheduled for September 2027. » puis « The vendor has not been selected yet. No final decision has been made. » Le montant, la date et les deux négations du texte d'entrée sont conservés sur cet exemple. Le test complet prend environ 1 min 30 sur le PC de développement, chargement et interface compris ; ce n'est pas un benchmark de débit. Aucun appel externe ni erreur JavaScript n'a été observé. Le document synthétique de validation a ensuite été supprimé de la bibliothèque.
+
+Le DOCX a été rouvert avec python-docx pour vérifier ses paragraphes, son titre et son repère source. Son rendu dans Word/LibreOffice n'a pas été vérifié. Le test réel porte sur un petit TXT français → anglais ; les autres langues, les longs documents et la fidélité des tableaux ne sont pas validés par cet essai. Les PDF et DOCX utilisent le même texte extrait, avec des vérifications automatisées de parcours et d'export. L'application ne réalise pas d'OCR et ne reconstruit pas la mise en page d'origine.
+
+Pour reproduire sans calcul réel : `.\.venv\Scripts\python.exe -m pytest -q -m "not slow"`, puis dans `web`, `npx playwright test tests/translation.spec.ts tests/summary-fast-ui.spec.ts`. Pour l'essai réel, démarrer Clair, définir `$env:CLAIR_REAL_TRANSLATION_TEST='1'` puis lancer `npx playwright test tests/translation-real.spec.ts` dans `web`. Ce dernier utilise les fichiers locaux de Qwen3 4B et enregistre un DOCX synthétique dans `data/translation-validation/`.
+
 ## Qwen3 4B dans Clair le 19 novembre 2026
 
 Qwen3 4B est recommandé quand il est installé. Le graphe local adapte l'[export ONNX publié par WebAI Community](https://huggingface.co/webai-community/ai-models/blob/main/Qwen3-4B/README.md) et conserve ses poids quantifiés. L'installation depuis les poids téléchargés a reproduit les cinq fichiers actifs à l'identique (SHA-256).
