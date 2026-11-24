@@ -2,7 +2,7 @@
 import json
 import re
 
-from . import llm, token_budget, webnn
+from . import llamacpp, llm, token_budget, webnn
 from .config import settings
 from .store import chunks, db
 
@@ -15,6 +15,8 @@ FORMAT = 'JSON complet, résumé factuel court et sources utilisées.'
 def context():
     if browser := webnn.ACTIVE.get():
         return browser.context
+    if llamacpp.ACTIVE.get() is not None:
+        return llamacpp.CONTEXT
     return max(settings.context, settings.summary_context)
 
 
@@ -121,7 +123,7 @@ async def prepare(doc, model, digest, cancel=None, progress=None):
     # Reuse ALL completed legacy leaves when available; do not throw away the
     # user's already paid-for reading work just because grouping improved.
     old_limit = llm.evidence_budget(engine.SUMMARY_QUESTION, 'synthèse structurée, 120 mots maximum', 320)
-    old_plan = (list(engine.leaf_plan(doc, old_limit, digest)) if webnn.ACTIVE.get() is None else
+    old_plan = (list(engine.leaf_plan(doc, old_limit, digest)) if webnn.ACTIVE.get() is None and model != llamacpp.MODEL else
                 [([{'text': engine.source_text(row), 'ids': [row['id']]}], None) for row in chunks(doc)])
     plan, pending = [], []
     for old_nodes, cached in old_plan:

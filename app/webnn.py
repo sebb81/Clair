@@ -93,6 +93,11 @@ def _tokenizer(path):
     return Tokenizer.from_file(path)
 
 
+def register_tokenizer(model, path):
+    tokenizer = _tokenizer(str(path))
+    token_budget.COUNTERS[model] = lambda text: len(tokenizer.encode(text, add_special_tokens=False).ids)
+
+
 def validate(model):
     from .llm import ModelError
     if ACTIVE.get() is None:
@@ -100,32 +105,33 @@ def validate(model):
     spec = MODELS[model]
     if not spec.installed():
         raise ModelError('Le modèle WebNN sélectionné est absent.')
-    tokenizer = _tokenizer(str(spec.asset('tokenizer.json')))
-    token_budget.COUNTERS[model] = lambda text: len(tokenizer.encode(text, add_special_tokens=False).ids)
+    register_tokenizer(model, spec.asset('tokenizer.json'))
     return spec.digest
 
 
 class Browser:
-    def __init__(self, device, model):
+    def __init__(self, device, model, context=None):
         self.events = asyncio.Queue()
         self.device = device
-        self.context = MODELS[model].context
+        self.context = context if context is not None else MODELS[model].context
 
     async def generate(self, messages, context, reserve, json_output, profile):
+        return await self.request({'type': 'generate', 'messages': messages, 'context': context,
+                                   'max_tokens': reserve, 'json_output': json_output, 'model': profile}, PENDING)
+
+    async def request(self, event, requests):
         request_id = uuid.uuid4().hex
         pending = asyncio.get_running_loop().create_future()
-        PENDING[request_id] = pending
+        requests[request_id] = pending
         try:
-            await self.events.put({'type': 'generate', 'id': request_id, 'messages': messages,
-                                   'context': context, 'max_tokens': reserve, 'json_output': json_output,
-                                   'model': profile})
+            await self.events.put({**event, 'id': request_id})
             try:
                 return await asyncio.wait_for(pending, timeout=900)
             except TimeoutError as exc:
                 from .llm import ModelError
-                raise ModelError('Le navigateur n’a pas terminé le calcul WebNN à temps.') from exc
+                raise ModelError('Le navigateur n’a pas terminé le calcul à temps.') from exc
         finally:
-            PENDING.pop(request_id, None)
+            requests.pop(request_id, None)
 
 
 async def generate(model, question, evidence, output_format, reserve, schema):

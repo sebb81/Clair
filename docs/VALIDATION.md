@@ -1,5 +1,88 @@
 # Validation actuelle et limites connues
 
+## Wllama CPU dans Edge
+
+Wllama 4.0.0 et llama.cpp natif ont traité la même question budgétaire et le même résumé rapide dans Clair, sur le document Horizon. Le modèle était le même fichier Qwen3 4B Q4_K_M, avec 3 072 tokens de contexte et 8 threads. Les deux moteurs ont utilisé respectivement 412 et 608 tokens d'entrée pour les deux tâches. Chaque cas a été mesuré une fois sur le PC de développement.
+
+| Mesure | Wllama CPU | llama.cpp CPU |
+| --- | ---: | ---: |
+| Question, premier accès au modèle | 40,48 s | 11,44 s |
+| Résumé, fichier déjà en cache dans Edge pour Wllama | 47,54 s | 17,35 s |
+| Pic de mémoire résidente échantillonné sur les deux tâches | 4,06 Gio (processus Edge) | 4,54 Gio (llama-server) |
+
+Les réponses budgétaires donnent 240 000 euros pour 2027 avec les références [S2] et [S3]. Les résumés citent [S1] et [S2]. Dans Edge, le test a ouvert un passage cité puis annulé une autre demande Wllama. L'annulation libère le verrou et aucun message incomplet n'est ajouté à l'historique. Les requêtes observées par le test restent sur l'origine de Clair.
+
+Le profil privé du premier essai a refusé la copie de 2,5 Go dans son cache. Le profil persistant utilisé pour les mesures a chargé le fichier complet. Le cache est propre au profil Edge et à l'origine locale. Pour rejouer le test, utilisez une bibliothèque de validation, définissez `CLAIR_REAL_WLLAMA_TEST=1` et exécutez `npx playwright test tests/wllama-real.spec.ts` depuis `web`. Les performances sur le Dell restent à mesurer.
+
+## llama.cpp CPU dans Clair
+
+Dans Edge, le choix **Qwen3 4B · llama.cpp (CPU)** a permis de poser une question et de lancer un résumé rapide sur le document de démonstration. Les deux réponses ont affiché **llama.cpp CPU** et des passages sources. L'essai a désactivé WebNN et a bloqué les requêtes du navigateur en dehors de Clair.
+
+L'API a aussi terminé un résumé approfondi en trois appels, avec quatre sources et un seul chargement du moteur. Un autre essai a interrompu une génération après le premier jeton. Le processus local s'est arrêté, le verrou de calcul a été libéré et l'historique a conservé uniquement la réponse terminée.
+
+Pour rejouer l'essai d'interface, installez le GGUF, démarrez Clair sur une bibliothèque de validation, puis exécutez `$env:CLAIR_REAL_LLAMACPP_TEST='1'` et `npx playwright test tests/llamacpp-real.spec.ts` depuis `web`. Le test crée puis supprime le document de démonstration de la bibliothèque de validation.
+
+## Comparer WebNN CPU et llama.cpp sur Windows
+
+Une fois Clair et les poids Qwen3 4B WebNN installés, exécutez cette commande dans PowerShell depuis la racine du projet.
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.benchmark_cpu
+```
+
+Au premier lancement, le banc télécharge environ 2,5 Go pour le GGUF officiel de Qwen et le binaire CPU Windows x64 de llama.cpp. Il vérifie leurs SHA-256. Les exécutions suivantes réutilisent ces fichiers. Le banc relève le processeur, la RAM et les instructions AVX2 et AVX‑512F exposées par Windows, puis teste 2, 4 et 8 threads avec trois répétitions pour une lecture de 512 tokens et une génération de 64 tokens.
+
+La comparaison utilise le worker WebNN de Clair dans une instance Edge isolée et llama-server sur localhost. Les moteurs traitent les mêmes extraits synthétiques et les mêmes consignes, avec un contexte de 3 072 tokens. La question factuelle démarre dans une nouvelle session et le résumé court suit avec le modèle chargé. Le cache disque de Windows suit son fonctionnement normal. Le cache du prompt est désactivé côté llama.cpp. Le banc mesure la génération et exclut l'import, la recherche et la validation des citations de l'application. Pour comparer les mesures à froid, ajouter `server_load_ms` au premier `elapsed_ms` de llama.cpp. Dans le relevé WebNN, la première durée inclut déjà le chargement.
+
+Chaque dossier `data/cpu-bench/run-…/` contient les résultats de `llama-bench`, les réponses des deux moteurs, les durées par phase et les pics mémoire échantillonnés. Le relevé natif couvre le processus llama-server et celui de WebNN couvre les processus de l'instance Edge. Utiliser le même poste et garder des conditions de charge comparables pour interpréter les écarts.
+
+Sur l'i9‑13980HX de développement, Windows expose AVX2. Le binaire officiel b12650 a choisi `ggml-cpu-alderlake.dll`. Les moyennes de trois répétitions sont les suivantes.
+
+| Threads | Traitement du prompt (tokens/s) | Génération (tokens/s) |
+| ---: | ---: | ---: |
+| 2 | 44,85 | 11,94 |
+| 4 | 79,18 | 18,00 |
+| 8 | 135,03 | 21,92 |
+
+Les deux moteurs ont donné la même réponse factuelle, **240 000 euros en 2027 [S2]**, sur une entrée de 311 tokens. Le délai complet était de **5,94 s avec llama.cpp** et de **66,34 s avec WebNN**. Le prétraitement WebNN a évalué un graphe dimensionné à 3 072 tokens. Le pic résident observé était d'environ **4,6 Gio** pour llama-server et **24,4 Gio** pour les processus Edge du banc.
+
+Les deux résumés ont atteint le premier plafond de 96 tokens. Avec un nouveau démarrage et un plafond de 160 tokens, le même résumé a abouti en **11,83 s avec llama.cpp** (144 tokens, fin naturelle) et **105,11 s avec WebNN** (121 tokens, fin naturelle). Les deux sorties citent `[S2]`, `[S3]` et `[S4]`. WebNN conserve la distinction entre un budget 2028 absent des extraits et un budget inexistant. La formulation « avec aucun budget indicatif pour 2028 » de llama.cpp est moins précise.
+
+Ces résultats comparent le GGUF Q4_K_M au modèle ONNX quantifié dans leurs moteurs respectifs. Chaque tâche documentaire a été mesurée une fois par configuration. Le Dell cible et les parcours documentaires complets restent à mesurer.
+
+## Bergamot dans Clair le 23 novembre 2026
+
+Le binaire Windows et les deux modèles ont été installés via `installer-traduction.bat`. Le parcours réel dans Edge a traduit du français vers l'anglais et de l'anglais vers le français avec WebNN désactivé dans les tests. Les deux exports DOCX ont abouti avec des événements indiquant le moteur Bergamot sur CPU.
+
+Sur le PC de développement, la traduction du PDF synthétique Horizon de quatre pages a pris **1,12 s**, démarrage du moteur compris et extraction exclue. Le DOCX contient les huit blocs et les quatre repères de page. Les dates, le montant et le nom vérifiés sont présents. La relecture a cependant relevé deux erreurs de vocabulaire. « Numerisation » est devenu « Number » et « indisponibilite » a donné « unspoilability ». Le test de reprise sur vingt pages a interrompu la demande après un bloc, puis traduit les 39 blocs restants. Le processus a été fermé à l'arrêt et à la fin.
+
+Pour rejouer les essais d'interface, installez Bergamot, démarrez Clair, puis exécutez `$env:CLAIR_REAL_BERGAMOT_TEST='1'` et `npx playwright test tests/translation-real.spec.ts --grep Bergamot` depuis `web`. Bergamot reste une option. La vitesse et la qualité sur un document représentatif du Dell cible restent à mesurer.
+
+## Mémoire et traduction le 20 novembre 2026
+
+Correction : la traduction utilise un contexte de 1 024 tokens, au lieu du contexte général de 3 072 tokens de Qwen3. Les blocs sources restent limités à 240 tokens. La sortie dispose de 512 tokens ; un dépassement entraîne toujours une subdivision sans suppression du texte source. Les deux sessions ONNX restent chargées entre blocs d'une même demande, puis sont libérées avec le contexte WebNN à la fin, en cas d'erreur ou d'arrêt. Les questions et préparations libèrent le moteur après 30 secondes d'inactivité. Un moteur bloqué est terminé après deux secondes d'attente de fermeture.
+
+**69 tests Python réussis**, un test lent d'extraction non exécuté ; build TypeScript/Vite réussi ; **11 tests d'interface simulés réussis**, dont la réutilisation entre blocs et la libération différée/immédiate ; **un parcours réel français → anglais avec export DOCX réussi** sur une base isolée. Le DOCX a été rouvert et le montant, la date et les négations vérifiés. Aucun appel externe ni erreur JavaScript n'est observé par ce parcours réel. La session de l'utilisateur, qui signalait un calcul actif, n'a pas été redémarrée.
+
+Le banc `web/scripts/benchmark-translation.mjs` utilise une instance Edge 157 séparée, deux passages français synthétiques identiques, les poids installés, le contexte CPU WebNN et aucune réponse en cache. Les métriques de mémoire additionnent uniquement les processus de cette instance Edge (y compris son service de calcul). Chaque valeur ci-dessous vient d'un seul passage du banc ; un calcul restait actif dans l'instance utilisateur. Ce n'est pas une garantie de vitesse sur un autre PC ou un long document.
+
+| Mesure | Qwen3 avant, 3 072 tokens | Qwen3 corrigé, 1 024 tokens | Qwen2.5 1,5B, 1 024 tokens |
+| --- | ---: | ---: | ---: |
+| Premier bloc, chargement compris | 134,98 s | 98,74 s | 37,33 s |
+| Chargement/compilation du premier bloc | 82,67 s | 83,84 s | 32,10 s |
+| Deuxième bloc, modèle déjà chargé | 43,55 s | 15,40 s | 5,01 s |
+| Mémoire privée après le deuxième bloc | 23,14 Gio | 22,89 Gio | 9,70 Gio |
+| Pic de mémoire privée au chargement/calcul | 27,64 Gio | 25,97 Gio | 12,80 Gio |
+| Pic de mémoire résidente | 24,64 Gio | 25,07 Gio | 11,36 Gio |
+
+Avec Qwen3, les deux sorties sont identiques avant/après (146/141 tokens d'entrée, 40/37 tokens de sortie, 41/38 exécutions WebNN). Le deuxième bloc est 2,83 fois plus rapide. **La réduction de contexte ne diminue pas sensiblement la mémoire occupée par le modèle chargé** ; le pic résident n'est pas réduit dans cet essai. L'amélioration mémoire principale est la libération automatique après la demande : l'instance corrigée revient à 0,64 Gio de mémoire résidente, avec confirmation de fermeture des sessions et du contexte. Le banc de référence ferme également son worker manuellement à la fin, contrairement à l'ancienne interface qui le conservait sans délai.
+
+Qwen2.5 1,5B conserve montant, dates, lieu, durée et négations sur ces deux passages, mais ajoute `END TRANSLATION` à la seconde sortie. Ce modèle reste une option manuelle dans les paramètres ; il ne remplace pas automatiquement Qwen3. Ces exemples ne valident ni la fidélité sur de longs documents ni les autres langues. Les rapports complets restent dans `data/translation-memory/{baseline,optimized,economical}.json` ; ils comprennent textes, métriques, échantillons mémoire et fermeture du moteur.
+
+Reproduction : démarrer Clair ; dans `web`, exécuter `node scripts/benchmark-translation.mjs baseline`, puis `node scripts/benchmark-translation.mjs optimized` et, facultativement, `node scripts/benchmark-translation.mjs economical`. Les deux premières variantes gardent les mêmes poids Qwen3 ; la troisième change explicitement de modèle. Pour le parcours réel isolé, `CLAIR_TEST_URL` peut désigner un second serveur local sur le port 5173, puis activer `CLAIR_REAL_TRANSLATION_TEST=1` et `CLAIR_REAL_DEVICE=cpu` avant `npx playwright test tests/translation-real.spec.ts`.
+
+Une lecture rembourrée de 512 tokens avec un cache de 1 024 tokens a été essayée et écartée : cet export déplace alors ses opérations d'attention sur le CPU de secours et échoue à l'exécution. Le worker conserve donc une lecture de même dimension que son cache. Un build ou des tests simulés ne suffisaient pas à détecter cette incompatibilité.
+
 ## Choix CPU GPU NPU commun aux fonctions le 19 novembre 2026
 
 Vérification de cette modification : **68 tests Python réussis**, un test lent d'extraction non exécuté ; compilation Vite/TypeScript réussie ; **9 tests d'interface réussis** avec moteur/API simulés ; **2 essais réels réussis** dans Edge. Les tests simulés couvrent les priorités NPU/GPU, le repli, la mémorisation des échecs, le nouveau test volontaire, le CPU sans essai accélérateur, l'arrêt sans repli, le délai d'expiration et l'échec de tous les périphériques. Les tests Python vérifient la transmission des quatre préférences aux questions, préparations et traductions, ainsi que la reprise d'une traduction avec des blocs CPU conservés et des blocs NPU simulés.

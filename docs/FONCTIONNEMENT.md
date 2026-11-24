@@ -1,16 +1,18 @@
 # Comprendre le fonctionnement de Clair
 
-Clair génère les réponses via WebNN dans Edge. Les mesures CPU du 18 novembre décrivent un essai historique avec Ollama.
+Clair propose WebNN dans Edge, llama.cpp natif sur CPU et Wllama sur CPU dans Edge. Les mesures CPU du 18 novembre décrivent un essai historique avec Ollama.
 
 ## Ce que fait l'application
 
-Clair permet d'importer un PDF, un document Word ou un fichier texte, puis de poser des questions sur son contenu. Le serveur local prépare les passages. Le moteur WebNN d'Edge rédige les réponses avec le modèle sélectionné. L'interface affiche les réponses et leurs sources.
+Clair permet d'importer un PDF, un document Word ou un fichier texte, puis de poser des questions sur son contenu. Le serveur local prépare les passages. Le moteur sélectionné dans **Modèle local** rédige la réponse. L'interface affiche le résultat, le moteur utilisé et ses sources.
 
 L'application choisit les passages à fournir au modèle selon la demande. Elle ne lui demande pas systématiquement de lire le document entier. C'est ce choix qui permet de réduire le travail sur CPU.
 
 ### Traduction du document
 
-L'onglet **Traduire** suit un parcours distinct : il utilise tout le texte extrait des pages, dans l'ordre, sans sélection BM25 ni résumé intermédiaire. Le modèle reçoit des passages courts et une consigne de traduction intégrale dans la langue choisie. Le calcul respecte le même réglage **Calcul WebNN** que le chat et les résumés : automatique, GPU prioritaire, NPU prioritaire ou CPU uniquement. Chaque passage terminé est enregistré dans SQLite pour reprendre après un arrêt. Si une sortie est tronquée, le passage est divisé puis retenté ; une erreur persistante bloque l'export complet.
+**Traduire** traite tout le texte extrait dans l'ordre des pages ou des blocs. Clair sauvegarde chaque bloc terminé et le retrouve à la reprise. Le moteur reste chargé pendant la traduction et est libéré à la fin ou à l'arrêt. Pour les questions et la préparation des résumés, WebNN se libère après 30 secondes sans nouvelle demande.
+
+Avec **Bergamot (CPU)**, choisissez le sens français → anglais ou anglais → français. Un modèle spécialisé traduit directement les passages sur le processeur. Avec **WebNN**, choisissez la langue cible. Le modèle détecte la langue source et suit le réglage matériel du chat et des résumés. Si une sortie est tronquée, Clair divise le passage puis réessaie. Une erreur persistante bloque l'export complet.
 
 Le mode automatique essaie le NPU, puis le GPU, puis le CPU. Les priorités GPU et NPU essaient d'abord le périphérique demandé, puis l'autre accélérateur, puis le CPU. Un test du modèle précède son utilisation sur chaque accélérateur. Le bandeau matériel affiche le contexte retenu et les raisons des replis. Un contexte ayant exécuté le modèle ne prouve pas que toutes les opérations ont été accélérées ni quelle puce physique le navigateur a utilisée. Un résultat ou un bloc réutilisé ne déclenche aucun nouveau calcul.
 

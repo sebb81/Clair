@@ -57,6 +57,16 @@ async function file(assets: string, name: string) {
   return response
 }
 
+async function release() {
+  const loaded = runtime
+  runtime = undefined
+  verified = false
+  if (!loaded) return
+  try {
+    await Promise.allSettled([loaded.prefill.release(), loaded.decode.release()])
+  } finally {loaded.ml.destroy()}
+}
+
 async function load(context: number, deviceType: Request['device'], model: ModelProfile) {
   if (!gpu) throw Error('WebNN est indisponible dans ce navigateur. Ouvrez Clair avec demarrer.bat.')
   report(`Chargement de ${model.name}…`)
@@ -204,6 +214,8 @@ async function generate({messages, context, max_tokens, json_output, device, mod
       done_reason: completeJson || eos.has(next) ? 'stop' : 'length',
       prompt_tokens: prompt.length,
       output_tokens: generated.length,
+      context_tokens: context,
+      prefill_tokens: context,
       dispatches: dispatches - before,
       load_ms: ready - started,
       prompt_evaluation_ms: first - ready,
@@ -214,26 +226,36 @@ async function generate({messages, context, max_tokens, json_output, device, mod
   }
 }
 
-self.onmessage = async ({data}: MessageEvent<Request>) => {
-  try {
-    let acceleratorCheckMs = 0
-    if (data.device !== 'cpu' && !verified) {
-      const started = performance.now()
-      report(`Vérification du modèle sur ${data.device.toUpperCase()}…`)
-      const check = await generate({...data,
-        messages: [{role: 'user', content: 'Count from 1 to 10. Only write the numbers.'}],
-        max_tokens: 56, json_output: false,
-      }, true)
-      if (check.text.match(/\d+/g)?.join(' ') !== '1 2 3 4 5 6 7 8 9 10') {
-        throw Error(`Le test de génération ${data.device.toUpperCase()} a échoué.`)
-      }
-      verified = true
-      acceleratorCheckMs = performance.now() - started
-    }
-    const result = await generate(data)
-    self.postMessage({type: 'result', result: {...result, accelerator_check_ms: acceleratorCheckMs,
-      gpu_check_ms: data.device === 'gpu' ? acceleratorCheckMs : 0}})
-  } catch (error) {
-    self.postMessage({type: 'error', message: error instanceof Error ? error.message : String(error)})
+async function handleRequest(data: Request | {type: 'release'}) {
+  if ('type' in data && data.type === 'release') {
+    await release()
+    self.postMessage({type: 'released'})
+    return
   }
+  const request = data as Request
+  let acceleratorCheckMs = 0
+  if (request.device !== 'cpu' && !verified) {
+    const started = performance.now()
+    report(`Vérification du modèle sur ${request.device.toUpperCase()}…`)
+    const check = await generate({...request,
+      messages: [{role: 'user', content: 'Count from 1 to 10. Only write the numbers.'}],
+      max_tokens: 56, json_output: false,
+    }, true)
+    if (check.text.match(/\d+/g)?.join(' ') !== '1 2 3 4 5 6 7 8 9 10') {
+      throw Error(`Le test de génération ${request.device.toUpperCase()} a échoué.`)
+    }
+    verified = true
+    acceleratorCheckMs = performance.now() - started
+  }
+  const result = await generate(request)
+  self.postMessage({type: 'result', result: {...result, accelerator_check_ms: acceleratorCheckMs,
+    gpu_check_ms: request.device === 'gpu' ? acceleratorCheckMs : 0}})
+}
+
+let operation = Promise.resolve()
+// Serialize shutdown with inference. The parent can terminate a stuck operation.
+self.onmessage = ({data}: MessageEvent<Request | {type: 'release'}>) => {
+  operation = operation.then(() => handleRequest(data)).catch(error => {
+    self.postMessage({type: 'error', message: error instanceof Error ? error.message : String(error)})
+  })
 }

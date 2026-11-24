@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import engine, llm, translation, webnn
+from . import bergamot, engine, llamacpp, llm, translation, webnn, wllama
 from .config import settings
 from .extract import extract
 from .store import db, document, initialize
@@ -73,10 +73,18 @@ async def local_only(request: Request, call_next):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'no-referrer'
     # ONNX Runtime's Emscripten glue compiles JS bindings inside the worker.
-    worker = request.url.path.startswith('/assets/webnn-worker-') and request.url.path.endswith('.js')
+    path = request.url.path
+    worker = path.startswith('/assets/webnn-worker-') and path.endswith('.js')
+    wasm_worker = path.startswith('/assets/wllama-worker-') and path.endswith('.js')
     script = "script-src 'self' 'unsafe-eval'" if worker else "script-src 'self'"
+    children = "worker-src 'self'"
+    if wasm_worker:
+        script = "script-src 'self' 'wasm-unsafe-eval' blob:"
+        children += ' blob:'
+    response.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
+    response.headers['Cross-Origin-Embedder-Policy'] = 'require-corp'
     response.headers['Content-Security-Policy'] = (
-        f"default-src 'self'; {script}; worker-src 'self'; style-src 'self' 'unsafe-inline'; "
+        f"default-src 'self'; {script}; {children}; style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
     return response
 
@@ -95,14 +103,26 @@ async def invalid(request, exc):
 def health():
     models = [spec.health(model) for model, spec in webnn.MODELS.items() if spec.installed()]
     recommended = models[-1] if models else None
+    native = {'model': llamacpp.MODEL, 'name': llamacpp.NAME,
+              'context': llamacpp.CONTEXT, 'installed': llamacpp.installed()}
+    wasm = {'model': wllama.MODEL, 'name': wllama.NAME, 'context': wllama.CONTEXT,
+            'installed': llamacpp.weights_installed()}
     return {'mode': 'webnn', 'webnn': recommended, 'webnn_models': models,
+            'llamacpp_model': native, 'wllama_model': wasm,
             'recommended_model': recommended['model'] if recommended else None,
-            'busy': compute_lock.locked(), 'max_upload_mb': settings.max_upload_mb}
+            'busy': compute_lock.locked() or import_lock.locked(), 'max_upload_mb': settings.max_upload_mb}
 
 
 @app.get('/api/webnn/assets/{name}')
 def webnn_asset(name: str):
     return webnn_model_asset(webnn.MODELS[webnn.MODEL].folder, name)
+
+
+@app.api_route('/api/wllama/model.gguf', methods=['GET', 'HEAD'])
+def wllama_model():
+    if not llamacpp.weights_installed():
+        raise HTTPException(404, 'Le fichier Qwen3 4B GGUF est absent.')
+    return FileResponse(llamacpp.directory() / llamacpp.MODEL_FILE, media_type='application/octet-stream')
 
 
 @app.get('/api/webnn/models/{folder}/assets/{name}')
@@ -118,6 +138,8 @@ class BrowserResult(BaseModel):
     text: str = Field(default='', max_length=32000)
     prompt_tokens: int = Field(default=0, ge=0, le=webnn.MAX_CONTEXT)
     output_tokens: int = Field(default=0, ge=0, le=webnn.MAX_CONTEXT)
+    context_tokens: int = Field(default=0, ge=0, le=webnn.MAX_CONTEXT)
+    prefill_tokens: int = Field(default=0, ge=0, le=webnn.MAX_CONTEXT)
     done_reason: str = Field(default='stop', pattern='^(stop|length)$')
     dispatches: int = Field(default=0, ge=0)
     device: str = Field(default='cpu', pattern='^(gpu|cpu|npu)$')
@@ -131,6 +153,20 @@ class BrowserResult(BaseModel):
     load_ms: float = Field(default=0, ge=0)
     prompt_evaluation_ms: float = Field(default=0, ge=0)
     output_generation_ms: float = Field(default=0, ge=0)
+
+
+class WllamaResult(BrowserResult):
+    threads: int = Field(default=1, ge=1, le=8)
+    generation_ms: float = Field(default=0, ge=0)
+
+
+@app.post('/api/wllama/results/{request_id}')
+async def wllama_result(request_id: str, body: WllamaResult):
+    pending = wllama.PENDING.get(request_id)
+    if pending is None or pending.done():
+        raise HTTPException(410, 'Calcul Wllama déjà terminé ou interrompu.')
+    pending.set_result(body.model_dump())
+    return {'accepted': True}
 
 
 @app.post('/api/webnn/results/{request_id}')
@@ -276,7 +312,7 @@ class Question(BaseModel):
 async def ask(doc: str, body: Question):
     document(doc)
 
-    async def operation(browser):
+    async def operation(events):
         if body.prepare_only:
             with llm.trace(doc):
                 digest = await llm.validate_model(body.model)
@@ -286,20 +322,35 @@ async def ask(doc: str, body: Question):
                     while not preparation.done():
                         await asyncio.wait({preparation}, timeout=1)
                         if progress and not preparation.done():
-                            await browser.events.put({'type': 'status', 'text':
+                            await events.put({'type': 'status', 'text':
                                 f"{progress.get('stage', 'Préparation')} · "
                                 f"{progress.get('stage_completed', 0)}/{progress.get('stage_total', '?')} lots"})
                     preparation.result()
                 finally:
                     preparation.cancel()
                     await asyncio.gather(preparation, return_exceptions=True)
-            await browser.events.put({'type': 'prepared'})
+            await events.put({'type': 'prepared'})
         else:
             async with aclosing(engine.answer(doc, body.question, body.model, body.strategy, body.output_format)) as response:
                 async for event in response:
-                    await browser.events.put(event)
+                    await events.put(event)
 
-    return await browser_response(body.model, body.webnn_device, operation)
+    if body.model == llamacpp.MODEL:
+        if not llamacpp.installed():
+            raise HTTPException(400, 'Installez le modèle CPU avec python -m scripts.benchmark_cpu --install-only.')
+        events = asyncio.Queue()
+
+        async def run():
+            async with llamacpp.session():
+                await operation(events)
+
+        return await compute_response(events, run)
+    if body.model == wllama.MODEL:
+        if not llamacpp.weights_installed():
+            raise HTTPException(400, 'Installez le GGUF avec python -m scripts.benchmark_cpu --install-gguf.')
+        return await browser_job(webnn.Browser('cpu', wllama.MODEL, wllama.CONTEXT),
+                                 lambda browser: operation(browser.events))
+    return await browser_response(body.model, body.webnn_device, lambda browser: operation(browser.events))
 
 
 async def browser_response(model, device, operation):
@@ -307,50 +358,65 @@ async def browser_response(model, device, operation):
         raise HTTPException(400, 'Choisissez un modèle WebNN dans Clair.')
     if not webnn.MODELS[model].installed():
         raise HTTPException(400, 'Le modèle WebNN choisi doit être installé.')
+    return await browser_job(webnn.Browser(device, model), operation)
+
+
+async def browser_job(browser, operation):
+    async def run():
+        context = webnn.ACTIVE.set(browser)
+        try:
+            await operation(browser)
+        finally:
+            webnn.ACTIVE.reset(context)
+
+    return await compute_response(browser.events, run)
+
+
+async def compute_response(events, operation):
     if compute_lock.locked():
         raise HTTPException(409, 'Un calcul est en cours. Arrêtez-le ou attendez sa fin.')
     await compute_lock.acquire()
 
-    async def browser_stream():
-        browser = webnn.Browser(device, model)
-
+    async def stream():
         async def run():
-            context = webnn.ACTIVE.set(browser)
             try:
-                await operation(browser)
+                await operation()
             except Exception as exc:
-                await browser.events.put({'type': 'error', 'message': str(exc)})
+                await events.put({'type': 'error', 'message': str(exc)})
             finally:
-                webnn.ACTIVE.reset(context)
-                browser.events.put_nowait(None)
+                events.put_nowait(None)
 
         task = asyncio.create_task(run())
         try:
-            while (event := await browser.events.get()) is not None:
+            while (event := await events.get()) is not None:
                 yield json.dumps(event, ensure_ascii=False) + '\n'
         finally:
             try:
                 task.cancel()
                 # Starlette cancels the streaming scope on disconnect. Finish
-                # cancelling the browser request before opening the lock again.
+                # cancelling the job before opening the lock again.
                 with CancelScope(shield=True):
                     await asyncio.gather(task, return_exceptions=True)
             finally:
                 compute_lock.release()
 
-    return StreamingResponse(browser_stream(), media_type='application/x-ndjson',
+    return StreamingResponse(stream(), media_type='application/x-ndjson',
                              headers={'Cache-Control': 'no-store'})
 
 
 class TranslationRequest(BaseModel):
     language: str = Field(pattern='^(en|fr|es|de|it|pt|nl)$')
-    model: str = Field(min_length=1, max_length=120)
+    model: str | None = Field(default=None, min_length=1, max_length=120)
+    engine: str = Field(default='webnn', pattern='^(webnn|bergamot)$')
+    source_language: str | None = Field(default=None, pattern='^(fr|en)$')
     webnn_device: str = Field(default='auto', pattern='^(auto|cpu|gpu|npu)$')
 
 
 @app.get('/api/documents/{doc}/translations')
 def translations(doc: str):
     return {'languages': {key: names[0] for key, names in translation.LANGUAGES.items()},
+            'bergamot_pairs': [{'source': model.source, 'target': model.target, 'installed': model.installed()}
+                               for model in bergamot.MODELS.values()],
             'translations': translation.history(doc)}
 
 
@@ -358,12 +424,25 @@ def translations(doc: str):
 async def translate(doc: str, body: TranslationRequest):
     document(doc)
 
-    async def operation(browser):
-        async with aclosing(translation.translate(doc, body.language, body.model)) as events:
+    async def operation(queue, model):
+        async with aclosing(translation.translate(doc, body.language, model)) as events:
             async for event in events:
-                await browser.events.put(event)
+                await queue.put(event)
 
-    return await browser_response(body.model, body.webnn_device, operation)
+    if body.engine == 'bergamot':
+        native = next((model for model in bergamot.MODELS.values()
+                       if (model.source, model.target) == (body.source_language, body.language)), None)
+        if not native:
+            raise HTTPException(400, 'Choisissez une direction français ↔ anglais pour Bergamot.')
+        if not native.installed():
+            raise HTTPException(400, 'Installez Bergamot avec installer-traduction.bat.')
+        queue = asyncio.Queue()
+        return await compute_response(queue, lambda: operation(queue, native.id))
+
+    if not body.model:
+        raise HTTPException(422, 'Choisissez un modèle WebNN dans Clair.')
+    return await browser_response(body.model, body.webnn_device,
+                                  lambda browser: operation(browser.events, body.model))
 
 
 @app.get('/api/documents/{doc}/translations/{translation_id}/download')

@@ -17,12 +17,30 @@ type Generation = {
 }
 let worker:Worker|undefined
 let workerModel:string|undefined
+let releasing:Promise<void>=Promise.resolve()
+let idleTimer:ReturnType<typeof setTimeout>|undefined
 const checkPrefix='clair-webnn-device-v2:'
 
 export function releaseBrowserModel() {
-  worker?.terminate()
+  clearTimeout(idleTimer)
+  const current=worker
   worker=undefined
   workerModel=undefined
+  if(!current)return releasing
+  // Terminating a worker alone leaves cleanup to the browser. Explicitly release
+  // ORT sessions and MLContext first, including between failed device attempts.
+  releasing=new Promise<void>(resolve=>{
+    const finish=()=>{clearTimeout(timer);current.onmessage=null;current.onerror=null;current.terminate();resolve()}
+    const timer=setTimeout(finish,2000)
+    current.onmessage=({data})=>{if(data.type==='released')finish()}
+    current.onerror=finish
+    try {current.postMessage({type:'release'})} catch {finish()}
+  })
+  return releasing
+}
+export function scheduleBrowserModelRelease() {
+  clearTimeout(idleTimer)
+  idleTimer=setTimeout(()=>{void releaseBrowserModel()},30000)
 }
 export function resetDeviceChecks() {
   releaseBrowserModel()
@@ -34,7 +52,8 @@ function plan(preference:DeviceSelection):Device[] {
   return ['npu','gpu','cpu']
 }
 
-function run(request:Generation,device:Device,signal:AbortSignal,status:(text:string)=>void,timeout:number) {
+async function run(request:Generation,device:Device,signal:AbortSignal,status:(text:string)=>void,timeout:number) {
+  await releasing
   signal.throwIfAborted()
   return new Promise<Record<string,any>>((resolve,reject)=>{
     worker??=new Worker(new URL('./webnn-worker.ts',import.meta.url),{type:'module'})
@@ -64,6 +83,7 @@ function run(request:Generation,device:Device,signal:AbortSignal,status:(text:st
 export async function generateInBrowser(request:Generation,signal:AbortSignal,status:(text:string)=>void,
                                         preference:DeviceSelection):Promise<DeviceReport> {
   // Cache failed compilations per model and context, so long jobs do not retry every block.
+  clearTimeout(idleTimer)
   const signature=JSON.stringify([request.model,request.context])
   const attempts:DeviceAttempt[]=[]
   const started=performance.now()
@@ -75,7 +95,7 @@ export async function generateInBrowser(request:Generation,signal:AbortSignal,st
     const failure=device!=='cpu'?sessionStorage.getItem(checkKey):null
     if(failure){attempts.push({device,status:'skipped',duration_ms:0,error:failure});continue}
     const runtime=signature+':'+device
-    if(workerModel!==runtime){releaseBrowserModel();workerModel=runtime}
+    if(workerModel!==runtime){await releaseBrowserModel();workerModel=runtime}
     const attemptStart=performance.now()
     const remaining=880000-(attemptStart-started)
     if(remaining<=0){result={error:'Délai global du calcul WebNN dépassé.'};break}
@@ -88,7 +108,7 @@ export async function generateInBrowser(request:Generation,signal:AbortSignal,st
       const error=String(result.error).slice(0,2000)
       attempts.push({device,status:'failed',duration_ms:performance.now()-attemptStart,error})
       if(device!=='cpu')sessionStorage.setItem(checkKey,error)
-      releaseBrowserModel()
+      await releaseBrowserModel()
       status(`${device.toUpperCase()} indisponible ou incompatible avec ce modèle. Essai du périphérique suivant…`)
       continue
     }

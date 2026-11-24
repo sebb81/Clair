@@ -2,22 +2,22 @@ import asyncio
 import io
 import json
 import re
-from contextlib import aclosing
+from contextlib import aclosing, asynccontextmanager
 
 import pytest
 from docx import Document
 from fastapi.testclient import TestClient
 
-from app import token_budget, translation, webnn
+from app import bergamot, token_budget, translation, webnn
 from app.extract import extract
-from app.main import app, browser_response, compute_lock
+from app.main import app, browser_response, compute_lock, compute_response
 from app.store import db, initialize
 
 
 @pytest.fixture
 def translator(monkeypatch):
     def validate(model):
-        token_budget.COUNTERS[model] = len
+        token_budget.COUNTERS[model] = lambda text: (len(text) + 3) // 4
         return webnn.MODELS[model].digest
     monkeypatch.setattr(webnn, 'validate', validate)
     monkeypatch.setattr(webnn.LocalModel, 'installed', lambda self: True)
@@ -201,6 +201,65 @@ def test_restart_retains_partial_jobs(imported, translator):
     assert translation.get(imported['id'], job['id'])['status'] == 'paused'
 
 
+def test_bergamot_disconnect_closes_session_and_preserves_native_blocks(imported, monkeypatch):
+    model = bergamot.MODELS['fr-en-tiny:bergamot']
+    completed_sources = []
+    interrupted = True
+    closed = []
+
+    class FakeBergamot:
+        async def translate(self, source, model_id):
+            assert model_id == 'local-fr-en'
+            if interrupted and completed_sources:
+                await asyncio.Event().wait()
+            completed_sources.append(source)
+            return {'text': 'Translated passage.', 'done_reason': 'stop', 'device': 'cpu'}
+
+    @asynccontextmanager
+    async def session(selected):
+        assert selected == model
+        try:
+            yield FakeBergamot(), 'local-fr-en'
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(bergamot.Model, 'installed', lambda self: True)
+    monkeypatch.setattr(bergamot, 'open_session', session)
+
+    async def run():
+        nonlocal interrupted
+        doc = imported['id']
+        queue = asyncio.Queue()
+
+        async def operation():
+            async with aclosing(translation.translate(doc, 'en', model.id)) as events:
+                async for event in events:
+                    await queue.put(event)
+
+        response = await compute_response(queue, operation)
+        async with aclosing(response.body_iterator) as stream:
+            async for item in stream:
+                event = json.loads(item)
+                if event['type'] == 'translation_progress' and event['translation']['completed'] == 1:
+                    break
+        assert closed == [True]
+        assert not compute_lock.locked()
+        partial = translation.history(doc)[0]
+        assert partial['status'] == 'paused' and partial['completed'] == 1
+        assert partial['engine'] == 'bergamot' and partial['source_language'] == 'fr'
+
+        interrupted = False
+        async with aclosing(translation.translate(doc, 'en', model.id)) as events:
+            final = [item async for item in events][-1]['translation']
+        assert final['id'] == partial['id'] and final['status'] == 'complete'
+        assert final['devices'] == [{'device': 'cpu', 'blocks': final['total']}]
+        assert len(completed_sources) == final['total']
+        assert completed_sources[0] not in completed_sources[1:]
+        assert closed == [True, True]
+
+    asyncio.run(run())
+
+
 def test_disconnect_cancels_pending_browser_request_and_releases_lock(imported, translator):
     async def run():
         async def operation(browser):
@@ -212,6 +271,8 @@ def test_disconnect_cancels_pending_browser_request_and_releases_lock(imported, 
             while True:
                 event = json.loads(await anext(stream))
                 if event['type'] == 'generate':
+                    assert event['context'] == 1024
+                    assert event['max_tokens'] == 512
                     request_id = event['id']
                     assert request_id in webnn.PENDING
                     break
@@ -219,6 +280,27 @@ def test_disconnect_cancels_pending_browser_request_and_releases_lock(imported, 
         assert not compute_lock.locked()
         assert translation.history(imported['id'])[0]['status'] == 'paused'
     asyncio.run(run())
+
+
+def test_translation_splits_oversized_prompts_before_browser_call(imported, translator, monkeypatch):
+    # Simulate unexpectedly expensive framing for a long block. It must be split
+    # without repeatedly compiling another, larger context or losing the source.
+    original = translation.messages
+    monkeypatch.setattr(translation, 'messages', lambda text, lang:
+                        original(text, lang) if len(text) < 100 else
+                        [{'role': 'system', 'content': 'x' * 2048}, original(text, lang)[1]])
+    seen = []
+    async def generate(messages, context, reserve, json_output, profile):
+        assert context == 1024 and reserve == 512
+        assert len(messages[0]['content']) < 500
+        seen.append(messages)
+        return await echo(messages)
+    job = run_translation(imported['id'], generate=generate)[-1]['translation']
+    assert job['completed'] == job['total'] == len(seen)
+    with db() as c:
+        rows = list(c.execute('SELECT source,page FROM translation_blocks WHERE translation=? ORDER BY position', (job['id'],)))
+        for page in c.execute('SELECT number,text FROM pages WHERE doc=?', (imported['id'],)):
+            assert re.sub(r'\s', '', ''.join(r['source'] for r in rows if r['page'] == page['number'])) == re.sub(r'\s', '', page['text'])
 
 
 @pytest.mark.parametrize('preference', ['auto', 'cpu', 'gpu', 'npu'])

@@ -8,10 +8,19 @@ async function setup(page:Page,outcomes:Record<string,string>,preference='auto')
     localStorage.setItem('clair-webnn-device',preference)
     ;(window as any).deviceCalls=[]
     ;(window as any).postedResults=[]
+    ;(window as any).workerStarts=0
+    ;(window as any).workerReleases=0
+    ;(window as any).workerStops=0
     class SimulatedWorker {
       onmessage:any=null;onerror:any=null;stopped=false
-      terminate(){this.stopped=true}
+      constructor(){(window as any).workerStarts++}
+      terminate(){this.stopped=true;(window as any).workerStops++}
       postMessage(data:any){
+        if(data.type==='release'){
+          ;(window as any).workerReleases++
+          setTimeout(()=>this.onmessage?.({data:{type:'released'}}),1)
+          return
+        }
         ;(window as any).deviceCalls.push(data.device)
         const error=outcomes[data.device]
         setTimeout(()=>{
@@ -117,4 +126,37 @@ test('Un accélérateur bloqué expire puis le GPU est essayé',async({page})=>{
   expect(await page.evaluate(()=>(window as any).deviceCalls)).toEqual(['npu','gpu'])
   const [result]=await page.evaluate(()=>(window as any).postedResults)
   expect(result.device_attempts[0].error).toContain('délai')
+})
+
+test('Le modèle est réutilisé puis libéré après 30 secondes sans demande',async({page})=>{
+  await page.clock.install()
+  await setup(page,{},'cpu')
+  await ask(page)
+  await ask(page,'Et en 2027 ?')
+  expect(await page.evaluate(()=>(window as any).workerStarts)).toBe(1)
+  expect(await page.evaluate(()=>(window as any).workerReleases)).toBe(0)
+  await page.clock.runFor(30010)
+  expect(await page.evaluate(()=>(window as any).workerReleases)).toBe(1)
+  expect(await page.evaluate(()=>(window as any).workerStops)).toBe(1)
+  await ask(page,'Quel est le montant ?')
+  expect(await page.evaluate(()=>(window as any).workerStarts)).toBe(2)
+})
+
+test('La traduction réutilise le moteur entre les blocs puis libère ses sessions',async({page})=>{
+  await setup(page,{},'cpu')
+  const job={id:'memory-job',model,language:'en',language_name:'Anglais',completed:2,total:2,status:'complete',warnings:[],error:''}
+  let complete=false
+  await page.route('**/translations',route=>route.fulfill({json:{languages:{en:'Anglais'},translations:complete?[job]:[]}}))
+  await page.route('**/translate',route=>{
+    complete=true
+    const generate=(id:string)=>({type:'generate',id,messages:[{role:'user',content:'Traduis ce texte.'}],context:1024,max_tokens:512,json_output:false,model:profile})
+    return route.fulfill({contentType:'application/x-ndjson',body:[generate('block-1'),generate('block-2'),{type:'translation_done',translation:job}].map(x=>JSON.stringify(x)).join('\n')+'\n'})
+  })
+  await page.getByRole('button',{name:'Traduire',exact:true}).click()
+  await page.getByRole('button',{name:'Traduire le document',exact:true}).click()
+  await expect(page.getByRole('button',{name:'Traduction terminée',exact:true})).toBeVisible()
+  expect(await page.evaluate(()=>(window as any).deviceCalls)).toEqual(['cpu','cpu'])
+  expect(await page.evaluate(()=>(window as any).workerStarts)).toBe(1)
+  expect(await page.evaluate(()=>(window as any).workerReleases)).toBe(1)
+  expect(await page.evaluate(()=>(window as any).workerStops)).toBe(1)
 })

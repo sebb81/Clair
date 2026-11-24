@@ -1,6 +1,6 @@
 # Clair — analyse documentaire IA locale
 
-Chargez un PDF, DOCX ou TXT, posez vos questions en français et consultez les passages sources. Clair génère les réponses exclusivement via **WebNN dans Edge**. Le choix **Automatique** utilise **Qwen3 4B** s'il est installé. Le serveur local extrait le texte, choisit les passages et vérifie les références. Aucun document ni question n'est transmis à une API cloud.
+Chargez un PDF, DOCX ou TXT, posez vos questions en français et consultez les passages sources. Pour les questions et les résumés, Clair propose **WebNN**, **llama.cpp sur CPU** et **Wllama sur CPU dans Edge**. Le choix **Automatique** utilise **Qwen3 4B WebNN** s'il est installé. Le serveur local extrait le texte, choisit les passages et vérifie les références. Aucun document ni question n'est transmis à une API cloud.
 
 **Pour expliquer l'application :** lire [Comprendre le fonctionnement](docs/FONCTIONNEMENT.md), avec un schéma, les deux modes de résumé et une explication à reprendre à l'oral. L'[index de la documentation](docs/README.md) distingue les guides actuels des anciens rapports et captures. Documentation relue le 18 novembre 2026.
 
@@ -28,13 +28,38 @@ Pour ajouter **Qwen3 4B** sur un autre poste, exécutez `.\scripts\installer-web
 
 ## Utilisation
 
+### Choisir llama.cpp pour les questions et les résumés
+
+Dans **Paramètres du modèle → Modèle local**, sélectionnez **Qwen3 4B · llama.cpp (CPU)**. Les réponses affichent le moteur utilisé et les passages sources. Clair démarre le moteur à la première génération de la demande et le libère à la fin ou à l'arrêt. Les préparations et résumés réutilisent le processus entre leurs lots.
+
+Sur un autre poste Windows x64, installez le binaire et le GGUF par cette commande PowerShell depuis la racine de Clair, puis rechargez la page. Le premier téléchargement représente environ 2,5 Go.
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.benchmark_cpu --install-only
+```
+
+### Choisir Wllama dans Edge
+
+Dans **Paramètres du modèle → Modèle local**, sélectionnez **Qwen3 4B · Wllama (CPU)** depuis un profil Edge normal. Edge utilise le GGUF de Clair via WebAssembly. La première demande remplit le cache du navigateur à partir du fichier servi sur `localhost`. Prévoyez environ 2,5 Go de stockage supplémentaires pour ce cache.
+
+Si le GGUF est absent, installez uniquement les poids depuis la racine du projet, puis rechargez Clair.
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.benchmark_cpu --install-gguf
+```
+
 ### Traduire un document
 
-Après importation, cliquez sur **Traduire**, choisissez la langue d'arrivée puis **Traduire le document**. Langues proposées : anglais, français, espagnol, allemand, italien, portugais et néerlandais. La langue d'origine est détectée par le modèle. Le modèle et le choix **Calcul WebNN** des paramètres sont communs à la traduction et aux questions/résumés. Le traitement reste local dans Edge.
+Après importation, cliquez sur **Traduire**, choisissez le moteur et la langue puis cliquez sur **Traduire le document**.
+
+- **WebNN** utilise le modèle et le réglage matériel des paramètres. Il détecte la langue d'origine et propose l'anglais, le français, l'espagnol, l'allemand, l'italien, le portugais et le néerlandais comme langues cibles.
+- **Bergamot (CPU)** traduit le français et l'anglais dans les deux sens. Sous Windows x64, double-cliquez une fois sur **`installer-traduction.bat`**, puis rechargez Clair. Dans **Traduire**, sélectionnez **Bergamot (CPU)** et indiquez le sens de traduction. L'installation télécharge le binaire [translateLocally](https://github.com/XapaJIaMnu/translateLocally) et les deux modèles. Les traductions s'effectuent ensuite hors ligne.
 
 Clair parcourt **tout le texte extrait**, dans l'ordre des pages ou des blocs, sans utiliser les résumés ni la recherche de passages. La progression indique les blocs terminés. **Arrêter la traduction** conserve ces blocs ; relancer avec la même langue et le même modèle reprend le travail manquant, y compris après redémarrage. Vous pouvez changer de préférence matérielle à la reprise : les anciens blocs sont conservés et leurs contextes de calcul sont indiqués séparément. Une réponse tronquée est redécoupée en passages plus courts ; si le modèle n'aboutit pas, l'erreur est affichée et l'export complet reste indisponible.
 
 Une fois la traduction terminée, cliquez sur **Télécharger la traduction en DOCX**. Le fichier conserve des repères de pages ou de blocs sources et les titres reconnaissables. Il ne reproduit pas la mise en page originale, les images ou les tableaux complexes. Les pages scannées nécessitent un OCR avant importation ; les avertissements d'extraction accompagnent le résultat. La traduction automatique doit être relue : le parcours de tous les blocs ne prouve pas la fidélité de chaque phrase. Les langues proposées demandent une validation adaptée aux documents utilisés.
+
+Avec WebNN, la traduction utilise un contexte réduit de 1 024 tokens. Chaque moteur libère ses ressources à la fin de la traduction ou à l'arrêt. Le chat et les préparations WebNN les libèrent après 30 secondes sans nouvelle demande. Les mesures et leurs limites sont décrites dans [la validation](docs/VALIDATION.md).
 
 ### Questions et résumés
 

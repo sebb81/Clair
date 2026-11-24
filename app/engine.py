@@ -6,7 +6,7 @@ import time
 import unicodedata
 from contextlib import aclosing
 
-from . import llm, selection, token_budget, summary, webnn
+from . import llamacpp, llm, selection, token_budget, summary, webnn, wllama
 from .config import settings
 from .store import chunks, db, document, sources
 
@@ -269,7 +269,7 @@ def leaf_plan(doc, budget, digest):
 
 
 async def prepare(doc, model, digest, cancel=None, progress=None):
-    if model in token_budget.COUNTERS:
+    if model in token_budget.COUNTERS or model in (llamacpp.MODEL, wllama.MODEL):
         return await summary.prepare(doc, model, digest, cancel, progress)
     return await _prepare_legacy(doc, model, digest, cancel, progress)
 
@@ -352,11 +352,13 @@ async def _answer(doc, question, model, strategy='auto', output_format='détaill
     if strategy == 'auto' and chosen == 'summary':
         chosen = 'fast'
     using_webnn = model in webnn.MODELS
+    using_gguf = model in (llamacpp.MODEL, wllama.MODEL)
+    token_budgeted = using_webnn or using_gguf
     generation_format, response_tokens = answer_policy(output_format)
     generation_question = (question + '\n' + FAST_POLICY
                            if chosen == 'fast' and (not using_webnn or model == webnn.QWEN3) else question)
     browser = webnn.ACTIVE.get()
-    device_key = ('webnn-device-v2', browser.device) if browser else ()
+    device_key = ('webnn-device-v2', browser.device) if browser and using_webnn else ()
     cache_key = fingerprint('answer-v4', FAST_POLICY, selection.VERSION, summary.VERSION, llm.TRANSPORT_VERSION, llm.COMPACT_SYSTEM,
                             doc, digest, model, question, strategy, generation_format,
                             response_tokens, settings.context, settings.summary_context,
@@ -378,10 +380,11 @@ async def _answer(doc, question, model, strategy='auto', output_format='détaill
         yield {'type': 'done', 'answer': cached['answer'], 'sources': source_rows, 'metrics': metrics,
                'warnings': json.loads(cached['warnings'])}
         return
-    count = token_budget.counter(model) if using_webnn else llm.token_estimate
-    final_context = webnn.MODELS[model].context if using_webnn else settings.context
+    count = token_budget.counter(model) if token_budgeted else llm.token_estimate
+    final_context = webnn.MODELS[model].context if using_webnn else (
+        llamacpp.CONTEXT if using_gguf else settings.context)
     budget = (summary.budget(model, question, generation_format, response_tokens, final_context)
-              if using_webnn else llm.evidence_budget(question, generation_format, response_tokens))
+              if token_budgeted else llm.evidence_budget(question, generation_format, response_tokens))
     warnings, ids, evidence, summary_calls = [], [], '', 0
     coverage = None
     total_chunks = info['chunks']
@@ -389,7 +392,7 @@ async def _answer(doc, question, model, strategy='auto', output_format='détaill
         warnings.extend(info['warnings'][:10])
     if chosen == 'fast':
         yield {'type': 'status', 'text': 'Sélection extractive des sections du document, sans appel au modèle…'}
-        if not using_webnn:
+        if not token_budgeted:
             final_context = min(max(settings.context, settings.summary_context), 8192)
         budget = summary.budget(model, generation_question, generation_format, response_tokens, final_context)
         evidence, ids, coverage = selection.select(list(chunks(doc)), info['sections'], budget, token_budget.counter(model))
@@ -404,7 +407,7 @@ async def _answer(doc, question, model, strategy='auto', output_format='détaill
             return
         rows = list(chunks(doc, found[0]['id']))
         evidence, ids = pack(rows, budget, count)
-        if using_webnn and len(ids) < len(rows):
+        if token_budgeted and len(ids) < len(rows):
             yield {'type': 'status', 'text': 'Synthèse de la section ciblée…'}
             progress = {'completed': 0, 'cached': 0, 'calls': 0}
             limit = summary.budget(model, summary.QUESTION, summary.FORMAT, 640, final_context)
@@ -422,7 +425,7 @@ async def _answer(doc, question, model, strategy='auto', output_format='détaill
                 nodes, level = condensed, 3
             summary_calls = progress['calls']
             warnings.append('Réponse fondée sur une synthèse complète de la section ; des détails peuvent être omis.')
-        elif not using_webnn and sum(count(source_text(r)) + 2 for r in rows) > budget:
+        elif not token_budgeted and sum(count(source_text(r)) + 2 for r in rows) > budget:
             yield {'type': 'status', 'text': 'Synthèse de la section ciblée…'}
             progress = {'completed': 0, 'cached': 0, 'calls': 0}
             nodes = ({'text': source_text(r), 'ids': [r['id']]} for r in chunks(doc, found[0]['id']))

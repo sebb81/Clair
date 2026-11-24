@@ -1,3 +1,10 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-export default defineConfig({plugins:[react()],server:{proxy:{'/api':'http://127.0.0.1:8765'}},build:{sourcemap:false}})
+export default defineConfig({
+  plugins:[react()],
+  server:{
+    proxy:{'/api':'http://127.0.0.1:8765'},
+    headers:{'Cross-Origin-Opener-Policy':'same-origin','Cross-Origin-Embedder-Policy':'require-corp'},
+  },
+  build:{sourcemap:false},
+})

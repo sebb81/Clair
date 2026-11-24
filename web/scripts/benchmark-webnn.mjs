@@ -1,13 +1,16 @@
+import {execFile} from 'node:child_process'
 import {createServer} from 'node:http'
 import {createReadStream, existsSync} from 'node:fs'
 import {readdir, readFile, stat, writeFile} from 'node:fs/promises'
 import path from 'node:path'
 import {fileURLToPath} from 'node:url'
+import {promisify} from 'node:util'
 import {chromium} from 'playwright'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const dist = path.join(root, 'web', 'dist', 'assets')
-const output = path.join(root, 'data', 'webnn-bench')
+const comparison = process.env.CLAIR_CPU_COMPARISON_DIR
+const output = comparison || path.join(root, 'data', 'webnn-bench')
 const installedCandidate = path.join(root, 'data', 'webnn-model', 'qwen25-15b')
 const candidates = {
   qwen2: {directory: path.join(root, 'data', 'webnn-model', 'qwen2'), profile: undefined},
@@ -29,6 +32,10 @@ for (const id of ['qwen2.5-3b-instruct', 'qwen3-4b', 'phi4-mini']) {
   if (existsSync(profilePath)) {
     candidates[id] = {directory, graphDirectory, profile: JSON.parse(await readFile(profilePath, 'utf8'))}
   }
+}
+if (comparison) {
+  const {directory, profile} = JSON.parse(await readFile(path.join(output, 'model.json'), 'utf8'))
+  candidates[profile.id] = {directory, graphDirectory: directory, profile}
 }
 const filter = process.env.CLAIR_BENCH_CASE?.split(',')
 const tests = JSON.parse(await readFile(path.join(output, 'cases.json'), 'utf8'))
@@ -78,10 +85,27 @@ const origin = `http://127.0.0.1:${server.address().port}`
 
 const selected = process.argv.slice(2)
 const ids = selected.length ? selected : Object.keys(candidates)
+const run = promisify(execFile)
+
+async function memory(cdp, peaks) {
+  const {processInfo} = await cdp.send('SystemInfo.getProcessInfo')
+  const ids = processInfo.map(process=>Number(process.id)).filter(Number.isSafeInteger)
+  if (!ids.length) return
+  const {stdout} = await run('powershell.exe', ['-NoProfile', '-Command',
+    `Get-Process -Id ${ids.join(',')} -ErrorAction SilentlyContinue | Select-Object WorkingSet64,PrivateMemorySize64 | ConvertTo-Json -Compress`],
+    {windowsHide:true})
+  const processes = [].concat(JSON.parse(stdout || '[]'))
+  for (const [metric, field] of [['resident_peak_mib','WorkingSet64'], ['private_peak_mib','PrivateMemorySize64']]) {
+    const mib = processes.reduce((sum, process)=>sum+process[field],0)/1048576
+    peaks[metric] = Math.max(peaks[metric] ?? 0, mib)
+  }
+}
+
 let browser
 try {
   browser = await chromium.launch({channel: 'msedge', chromiumSandbox: true,
     args: ['--enable-features=WebMachineLearningNeuralNetwork']})
+  const cdp = comparison ? await browser.newBrowserCDPSession() : null
   for (const id of ids) {
     if (!Object.hasOwn(candidates, id)) throw new Error(`Unknown model: ${id}`)
     const record = {model: id, browser: browser.version(), context: Number(process.env.CLAIR_BENCH_CONTEXT || 2048), results: []}
@@ -99,21 +123,39 @@ try {
         await page.goto(origin)
         console.log(`${id} ${device} starting`)
         for (const test of tests) {
-          const result = await page.evaluate(({url, data}) => new Promise(resolve => {
-            const worker = window.clairWorker ??= new Worker(url, {type: 'module'})
-            const start = performance.now(), states = []
-            const finish = result => {
-              clearTimeout(timer)
-              worker.onmessage = worker.onerror = null
-              resolve({...result, elapsed_ms: performance.now() - start, states})
+          console.log(`${device} · ${test.id}`)
+          const peaks = {}
+          let collecting = true
+          const monitor = cdp && (async () => {
+            while (collecting) {
+              try { await memory(cdp, peaks) }
+              catch (error) { peaks.memory_sampling_error ??= error.message }
+              if (collecting) await new Promise(resolve=>setTimeout(resolve,2000))
             }
-            const timer = setTimeout(() => finish({error: 'Timed out after 240 s'}), 240000)
-            worker.onmessage = ({data}) => data.type === 'status' ? states.push(data.text) :
-              finish(data.type === 'result' ? data.result : {error: data.message})
-            worker.onerror = event => finish({error: event.message})
-            worker.postMessage(data)
-          }), {url: `/assets/${worker}`, data: {...test.request, device, context: record.context, model: candidates[id].profile}})
-          record.results.push({device, test: test.id, ...result, external: [...external]})
+          })()
+          let result
+          try {
+            result = await page.evaluate(({url, data}) => new Promise(resolve => {
+              const worker = window.clairWorker ??= new Worker(url, {type: 'module'})
+              const start = performance.now(), states = []
+              const finish = result => {
+                clearTimeout(timer)
+                worker.onmessage = worker.onerror = null
+                resolve({...result, elapsed_ms: performance.now() - start, states})
+              }
+              const timer = setTimeout(() => finish({error: 'Timed out after 240 s'}), 240000)
+              worker.onmessage = ({data}) => data.type === 'status' ? states.push(data.text) :
+                finish(data.type === 'result' ? data.result : {error: data.message})
+              worker.onerror = event => finish({error: event.message})
+              worker.postMessage(data)
+            }), {url: `/assets/${worker}`, data: {...test.request, device, context: record.context, model: candidates[id].profile}})
+          } catch (error) {
+            result = {error: error.message}
+          } finally {
+            collecting = false
+            await monitor
+          }
+          record.results.push({device, test: test.id, ...result, ...peaks, external: [...external]})
           await checkpoint()
           console.log(`${id} ${device} ${test.id}: ${result.error || (result.elapsed_ms / 1000).toFixed(2) + ' s; ' + result.dispatches + ' appels WebNN'}`)
           if (result.error) break

@@ -4,17 +4,22 @@ import hashlib
 import io
 import json
 import re
+from contextlib import nullcontext
 
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
-from . import token_budget, webnn
+from . import bergamot, token_budget, webnn
 from .extract import heading
 from .store import db, document
 
 VERSION = 'translation-v1'
+# A source block is at most 240 tokens. Compile a small, stable prompt shape
+# instead of evaluating 3,072 padded tokens for every heading/paragraph.
+CONTEXT = 1024
+OUTPUT_TOKENS = 512
 LANGUAGES = {
     'en': ('Anglais', 'English'), 'fr': ('Français', 'French'),
     'es': ('Espagnol', 'Spanish'), 'de': ('Allemand', 'German'),
@@ -49,16 +54,16 @@ def split_source(text, count, limit=240):
         text = text[end:]
 
 
-def page_parts(text, count):
+def page_parts(text, count, limit=240):
     buffer = []
     for line in text.splitlines(keepends=True):
         if heading(line.strip()):
-            yield from split_source(''.join(buffer), count)
+            yield from split_source(''.join(buffer), count, limit)
             buffer.clear()
-            yield from split_source(line, count)
+            yield from split_source(line, count, limit)
         else:
             buffer.append(line)
-    yield from split_source(''.join(buffer), count)
+    yield from split_source(''.join(buffer), count, limit)
 
 
 def get(doc, translation_id):
@@ -72,12 +77,22 @@ def get(doc, translation_id):
     result = dict(row)
     result['warnings'] = json.loads(result['warnings'])
     result['language_name'] = LANGUAGES[result['language']][0]
+    native = bergamot.MODELS.get(result['model'])
+    result['engine'] = 'bergamot' if native else 'webnn'
+    result['source_language'] = native.source if native else None
+    result['model_name'] = model_name(result['model'])
     with db() as c:
         result['devices'] = [dict(r) for r in c.execute('''
             SELECT json_extract(metrics,'$.device') device, count(*) blocks
             FROM translation_blocks WHERE translation=? AND text IS NOT NULL
             AND json_extract(metrics,'$.device') IS NOT NULL GROUP BY device''', (translation_id,))]
     return result
+
+
+def model_name(model):
+    if model in bergamot.MODELS:
+        return f'Bergamot ({bergamot.MODELS[model].code})'
+    return webnn.MODELS[model].name if model in webnn.MODELS else model
 
 
 def history(doc):
@@ -91,9 +106,16 @@ def create(doc, language, model):
     info = document(doc)
     if language not in LANGUAGES:
         raise ValueError('Langue de traduction non prise en charge.')
-    spec = webnn.MODELS[model]
-    key = hashlib.sha256(json.dumps([VERSION, doc, language, model, spec.digest,
-                                     spec.context, spec.profile], sort_keys=True).encode()).hexdigest()[:32]
+    native = bergamot.MODELS.get(model)
+    if native:
+        # Keep paragraphs together where possible; Bergamot splits sentences internally.
+        signature = ['bergamot-v1', doc, native.source, language, model, native.digest, bergamot.RELEASE]
+        count, limit = len, 1200
+    else:
+        spec = webnn.MODELS[model]
+        signature = [VERSION, doc, language, model, spec.digest, spec.context, spec.profile]
+        count, limit = token_budget.counter(model), 240
+    key = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()[:32]
     with db() as c:
         if c.execute('SELECT 1 FROM translations WHERE id=?', (key,)).fetchone():
             return get(doc, key)
@@ -105,7 +127,7 @@ def create(doc, language, model):
                   (key, doc, language, model, json.dumps(warnings, ensure_ascii=False)))
         ordinal = 0
         for page in c.execute('SELECT number,text FROM pages WHERE doc=? ORDER BY number', (doc,)):
-            for part in page_parts(page['text'], token_budget.counter(model)):
+            for part in page_parts(page['text'], count, limit):
                 if not part.strip():
                     continue
                 ordinal += 1
@@ -147,8 +169,26 @@ def divide(key, block):
                       (key, block['position'] + f'.{index}', block['page'], source, block['heading']))
 
 
+async def translate_webnn(source, language, model):
+    prompt = messages(source, language)
+    # Match the worker's ChatML framing, including Qwen3's disabled thinking prefix.
+    framing = ''.join(f"<|im_start|>{m['role']}\n{m['content'].replace('<|', '‹|')}<|im_end|>\n" for m in prompt)
+    framing += '<|im_start|>assistant\n' + ('<think>\n\n</think>\n\n' if model == webnn.QWEN3 else '')
+    prompt_tokens = token_budget.counter(model)(framing)
+    spec = webnn.MODELS[model]
+    context = min(CONTEXT, spec.context)
+    reserve = min(OUTPUT_TOKENS, context - prompt_tokens - 32)
+    if reserve < OUTPUT_TOKENS:
+        return {}
+    return await webnn.ACTIVE.get().generate(prompt, context, reserve, False, spec.profile)
+
+
 async def translate(doc, language, model):
-    webnn.validate(model)
+    native = bergamot.MODELS.get(model)
+    if native is None:
+        webnn.validate(model)
+    elif not native.installed() or native.target != language:
+        raise ValueError('Modèle Bergamot indisponible pour ces langues.')
     job = create(doc, language, model)
     key = job['id']
     if job['status'] == 'complete':
@@ -156,40 +196,36 @@ async def translate(doc, language, model):
         return
     with db() as c:
         c.execute("UPDATE translations SET status='running', error='' WHERE id=?", (key,))
-    spec = webnn.MODELS[model]
     try:
         yield {'type': 'translation_progress', 'translation': get(doc, key)}
-        while True:
-            with db() as c:
-                row = c.execute('''SELECT * FROM translation_blocks WHERE translation=? AND text IS NULL
-                                   ORDER BY position LIMIT 1''', (key,)).fetchone()
-            if row is None:
-                break
-            block = dict(row)
-            prompt = messages(block['source'], language)
-            # Match the worker's ChatML framing, including Qwen3's disabled thinking prefix.
-            framing = ''.join(f"<|im_start|>{m['role']}\n{m['content'].replace('<|', '‹|')}<|im_end|>\n" for m in prompt)
-            framing += '<|im_start|>assistant\n' + ('<think>\n\n</think>\n\n' if model == webnn.QWEN3 else '')
-            reserve = min(1024, spec.context - token_budget.counter(model)(framing) - 32)
-            if reserve < 512:
-                divide(key, block)
-                continue
-            job = get(doc, key)
-            yield {'type': 'status', 'text': f"Traduction · {job['completed']}/{job['total']} blocs · page/bloc {block['page']}"}
-            result = await webnn.ACTIVE.get().generate(prompt, spec.context, reserve, False, spec.profile)
-            if result.get('error'):
-                raise ValueError(result['error'])
-            text = result.get('text', '').strip()
-            if result.get('done_reason') != 'stop' or not text:
-                divide(key, block)
+        async with (bergamot.open_session(native) if native else nullcontext()) as session:
+            while True:
+                with db() as c:
+                    row = c.execute('''SELECT * FROM translation_blocks WHERE translation=? AND text IS NULL
+                                       ORDER BY position LIMIT 1''', (key,)).fetchone()
+                if row is None:
+                    break
+                block = dict(row)
+                job = get(doc, key)
+                yield {'type': 'status', 'text': f"Traduction · {job['completed']}/{job['total']} blocs · page/bloc {block['page']}"}
+                if session:
+                    client, model_id = session
+                    result = await client.translate(block['source'], model_id)
+                else:
+                    result = await translate_webnn(block['source'], language, model)
+                if result.get('error'):
+                    raise ValueError(result['error'])
+                text = result.get('text', '').strip()
+                if result.get('done_reason') != 'stop' or not text:
+                    divide(key, block)
+                    yield {'type': 'translation_progress', 'translation': get(doc, key)}
+                    continue
+                metrics = {k: v for k, v in result.items() if k != 'text'}
+                with db() as c:
+                    c.execute('''UPDATE translation_blocks SET text=?,metrics=?
+                                 WHERE translation=? AND position=?''',
+                              (text, json.dumps(metrics), key, block['position']))
                 yield {'type': 'translation_progress', 'translation': get(doc, key)}
-                continue
-            metrics = {k: v for k, v in result.items() if k != 'text'}
-            with db() as c:
-                c.execute('''UPDATE translation_blocks SET text=?,metrics=?
-                             WHERE translation=? AND position=?''',
-                          (text, json.dumps(metrics), key, block['position']))
-            yield {'type': 'translation_progress', 'translation': get(doc, key)}
         with db() as c:
             c.execute("UPDATE translations SET status='complete' WHERE id=?", (key,))
         yield {'type': 'translation_done', 'translation': get(doc, key)}
@@ -220,7 +256,7 @@ def export_docx(doc, translation_id):
     normal.element.get_or_add_rPr().append(lang)
     output.styles['Title'].font.color.rgb = RGBColor(0, 0, 0)
     output.add_paragraph(info['name'], 'Title')
-    output.add_paragraph(f"Traduction en {job['language_name']} · {webnn.MODELS[job['model']].name}")
+    output.add_paragraph(f"Traduction en {job['language_name']} · {job['model_name']}")
     for warning in job['warnings']:
         output.add_paragraph(warning)
     page = None

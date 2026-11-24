@@ -3,13 +3,13 @@ import json
 import re
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import aclosing, contextmanager
 from contextvars import ContextVar
 
 import httpx
 
 from .config import settings
-from . import token_budget, webnn
+from . import llamacpp, token_budget, webnn, wllama
 
 TRACE = ContextVar('llm_trace', default=None)
 MODEL_INFO = {}
@@ -76,6 +76,18 @@ async def models():
 async def validate_model(name):
     if name in webnn.MODELS:
         return webnn.validate(name)
+    if name in (llamacpp.MODEL, wllama.MODEL):
+        available = (llamacpp.ACTIVE.get() is not None and llamacpp.installed()) if name == llamacpp.MODEL else (
+            webnn.ACTIVE.get() is not None and llamacpp.weights_installed())
+        if not available:
+            raise ModelError('Le modèle Qwen3 4B GGUF est indisponible.')
+        tokenizer = webnn.MODELS[webnn.QWEN3].asset('tokenizer.json')
+        if tokenizer.is_file():
+            webnn.register_tokenizer(name, tokenizer)
+        else:
+            token_budget.COUNTERS.pop(name, None)
+        runtime = llamacpp.RELEASE if name == llamacpp.MODEL else wllama.VERSION
+        return f'{runtime}:{llamacpp.MODEL_SHA256}:{llamacpp.CONTEXT}'
     available = await models()
     model = next((m for m in available or [] if m['name'] == name), None)
     if model is None:
@@ -183,6 +195,24 @@ async def generate(model, question, evidence, output_format='détaillé', respon
         return
     context = context or settings.context
     messages = compact_prompt(question, evidence, output_format, schema=schema)
+    if model == wllama.MODEL:
+        async for event in wllama.generate(messages, reserve, schema):
+            if event['type'] == 'llm_metrics':
+                record(event['metrics'], model)
+            yield event
+        return
+    if model == llamacpp.MODEL:
+        if token_budget.counter(model)(llamacpp.chatml(messages)) + reserve > llamacpp.CONTEXT:
+            raise ModelError('Le texte et la réponse dépassent le contexte llama.cpp.')
+        try:
+            async with aclosing(llamacpp.ACTIVE.get().stream(messages, reserve, schema)) as response:
+                async for event in response:
+                    if event['type'] == 'llm_metrics':
+                        record(event['metrics'], model)
+                    yield event
+        except (httpx.HTTPError, OSError) as exc:
+            raise ModelError('Le calcul llama.cpp a échoué. Consultez data/cpu-bench/llama-clair.log.') from exc
+        return
     canonical_bytes = sum(token_estimate(m['content']) for m in prompt(question, evidence, output_format))
     transmitted_bytes = sum(token_estimate(m['content']) for m in messages)
     count = token_budget.counter(model)
