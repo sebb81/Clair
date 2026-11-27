@@ -76,7 +76,7 @@ async def models():
 async def validate_model(name):
     if name in webnn.MODELS:
         return webnn.validate(name)
-    if name in (llamacpp.MODEL, wllama.MODEL):
+    if name == llamacpp.MODEL or name in wllama.DEVICES:
         available = (llamacpp.ACTIVE.get() is not None and llamacpp.installed()) if name == llamacpp.MODEL else (
             webnn.ACTIVE.get() is not None and llamacpp.weights_installed())
         if not available:
@@ -87,6 +87,8 @@ async def validate_model(name):
         else:
             token_budget.COUNTERS.pop(name, None)
         runtime = llamacpp.RELEASE if name == llamacpp.MODEL else wllama.VERSION
+        if name == wllama.WEBGPU_MODEL:
+            runtime += ':webgpu'
         return f'{runtime}:{llamacpp.MODEL_SHA256}:{llamacpp.CONTEXT}'
     available = await models()
     model = next((m for m in available or [] if m['name'] == name), None)
@@ -195,8 +197,8 @@ async def generate(model, question, evidence, output_format='détaillé', respon
         return
     context = context or settings.context
     messages = compact_prompt(question, evidence, output_format, schema=schema)
-    if model == wllama.MODEL:
-        async for event in wllama.generate(messages, reserve, schema):
+    if model in wllama.DEVICES:
+        async for event in wllama.generate(model, messages, reserve, schema):
             if event['type'] == 'llm_metrics':
                 record(event['metrics'], model)
             yield event

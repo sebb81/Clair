@@ -1,4 +1,4 @@
-param([switch]$NoBrowser)
+param([switch]$NoBrowser, [switch]$GpuHautePerformance)
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
 if (-not (Test-Path '.venv\Scripts\python.exe') -or -not (Test-Path 'web\dist\index.html')) {
@@ -16,8 +16,9 @@ function Open-Clair {
     ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
     if (-not $edge) { throw 'Microsoft Edge est requis. Installez-le puis relancez demarrer.bat.' }
     $profile = Join-Path $root 'data\edge-webnn'
-    Start-Process -FilePath $edge -ArgumentList @("--user-data-dir=`"$profile`"",
-        '--enable-features=WebMachineLearningNeuralNetwork', '--no-first-run', $url)
+    $edgeArgs = @("--user-data-dir=`"$profile`"", '--enable-features=WebMachineLearningNeuralNetwork', '--no-first-run')
+    if ($GpuHautePerformance) { $edgeArgs += '--force-high-performance-gpu' }
+    Start-Process -FilePath $edge -ArgumentList ($edgeArgs + $url)
 }
 $healthy = $false
 $health = $null

@@ -37,6 +37,6 @@ def counter(model):
 def method(model):
     if model not in COUNTERS:
         return 'utf8-byte-upper-bound'
-    if model.endswith((':llamacpp', ':wllama')):
+    if model.endswith((':llamacpp', ':wllama', ':wllama-webgpu')):
         return 'qwen3-local-bpe'
     return 'webnn-local-bpe' if model.endswith(':webnn') else 'installed-qwen35-bpe'

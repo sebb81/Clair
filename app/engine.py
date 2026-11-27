@@ -269,7 +269,7 @@ def leaf_plan(doc, budget, digest):
 
 
 async def prepare(doc, model, digest, cancel=None, progress=None):
-    if model in token_budget.COUNTERS or model in (llamacpp.MODEL, wllama.MODEL):
+    if model in token_budget.COUNTERS or model == llamacpp.MODEL or model in wllama.DEVICES:
         return await summary.prepare(doc, model, digest, cancel, progress)
     return await _prepare_legacy(doc, model, digest, cancel, progress)
 
@@ -352,7 +352,7 @@ async def _answer(doc, question, model, strategy='auto', output_format='détaill
     if strategy == 'auto' and chosen == 'summary':
         chosen = 'fast'
     using_webnn = model in webnn.MODELS
-    using_gguf = model in (llamacpp.MODEL, wllama.MODEL)
+    using_gguf = model == llamacpp.MODEL or model in wllama.DEVICES
     token_budgeted = using_webnn or using_gguf
     generation_format, response_tokens = answer_policy(output_format)
     generation_question = (question + '\n' + FAST_POLICY
@@ -371,7 +371,7 @@ async def _answer(doc, question, model, strategy='auto', output_format='détaill
         metrics = {'cached_answer': True, 'model_calls': 0, 'prompt_tokens': 0, 'output_tokens': 0,
                    'strategy': previous['strategy'], 'source_blocks': previous['source_blocks'],
                    'total_blocks': previous['total_blocks'],
-                   **{key: previous[key] for key in ('runtime', 'device', 'model') if key in previous},
+                   **{key: previous[key] for key in ('runtime', 'device', 'model', 'gpu_layers', 'total_layers') if key in previous},
                    'total_ms': (time.perf_counter() - started) * 1000}
         if 'coverage' in previous:
             metrics['coverage'] = previous['coverage']

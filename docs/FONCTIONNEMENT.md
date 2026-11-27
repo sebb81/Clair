@@ -1,6 +1,6 @@
 # Comprendre le fonctionnement de Clair
 
-Clair propose WebNN dans Edge, llama.cpp natif sur CPU et Wllama sur CPU dans Edge. Les mesures CPU du 18 novembre décrivent un essai historique avec Ollama.
+Clair propose WebNN dans Edge, llama.cpp natif sur CPU et Wllama sur CPU ou WebGPU dans Edge. Les mesures CPU du 18 novembre décrivent un essai historique avec Ollama.
 
 ## Ce que fait l'application
 

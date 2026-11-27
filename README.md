@@ -1,6 +1,6 @@
 # Clair — analyse documentaire IA locale
 
-Chargez un PDF, DOCX ou TXT, posez vos questions en français et consultez les passages sources. Pour les questions et les résumés, Clair propose **WebNN**, **llama.cpp sur CPU** et **Wllama sur CPU dans Edge**. Le choix **Automatique** utilise **Qwen3 4B WebNN** s'il est installé. Le serveur local extrait le texte, choisit les passages et vérifie les références. Aucun document ni question n'est transmis à une API cloud.
+Chargez un PDF, DOCX ou TXT, posez vos questions en français et consultez les passages sources. Pour les questions et les résumés, Clair propose **WebNN**, **llama.cpp sur CPU** et **Wllama sur CPU ou WebGPU dans Edge**. Le choix **Automatique** utilise **Qwen3 4B WebNN** s'il est installé. Le serveur local extrait le texte, choisit les passages et vérifie les références. Aucun document ni question n'est transmis à une API cloud.
 
 **Pour expliquer l'application :** lire [Comprendre le fonctionnement](docs/FONCTIONNEMENT.md), avec un schéma, les deux modes de résumé et une explication à reprendre à l'oral. L'[index de la documentation](docs/README.md) distingue les guides actuels des anciens rapports et captures. Documentation relue le 18 novembre 2026.
 
@@ -40,7 +40,11 @@ Sur un autre poste Windows x64, installez le binaire et le GGUF par cette comman
 
 ### Choisir Wllama dans Edge
 
-Dans **Paramètres du modèle → Modèle local**, sélectionnez **Qwen3 4B · Wllama (CPU)** depuis un profil Edge normal. Edge utilise le GGUF de Clair via WebAssembly. La première demande remplit le cache du navigateur à partir du fichier servi sur `localhost`. Prévoyez environ 2,5 Go de stockage supplémentaires pour ce cache.
+Dans **Paramètres du modèle → Modèle local**, sélectionnez **Qwen3 4B · Wllama (WebGPU)** ou **Qwen3 4B · Wllama (CPU)** depuis un profil Edge normal. Les deux modes partagent le même fichier GGUF et le même cache Edge, alimenté depuis `localhost` au premier calcul. Prévoyez environ 2,5 Go de stockage pour ce cache.
+
+En mode WebGPU, Clair indique le nombre de couches que Wllama a chargées sur le GPU. Si aucune couche n'est confirmée, Clair affiche une erreur. Le mode CPU reste sélectionnable dans le même menu.
+
+Sur un PC avec deux GPU, pour demander à Edge d'utiliser son GPU haute performance, fermez les fenêtres du profil Clair puis lancez `demarrer.bat -GpuHautePerformance` depuis le dossier de Clair. Le paramètre est appliqué au démarrage d'Edge.
 
 Si le GGUF est absent, installez uniquement les poids depuis la racine du projet, puis rechargez Clair.
 

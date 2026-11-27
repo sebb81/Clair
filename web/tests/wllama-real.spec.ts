@@ -28,12 +28,14 @@ function sampleMemory(profile:string, native:boolean) {
   return async()=>{active=false;await sampling;return Math.round(peakMiB)}
 }
 
-test('Wllama CPU dans Clair, citations, comparaison locale et arrêt',async({request},testInfo)=>{
+test('Wllama dans Clair, citations, comparaison locale et arrêt',async({request},testInfo)=>{
   test.skip(process.env.CLAIR_REAL_WLLAMA_TEST!=='1','Activer sur une bibliothèque de validation avec le GGUF installé.')
-  test.setTimeout(240000)
+  const withGPU=process.env.CLAIR_REAL_WLLAMA_WEBGPU==='1'
+  test.setTimeout(withGPU ? 330000 : 240000)
   const temp=await realpath(tmpdir())
   const profile=await mkdtemp(join(temp,'clair-wllama-test-'))
-  const context=await chromium.launchPersistentContext(profile,{channel:'msedge',viewport:{width:1440,height:1050}})
+  const args=process.env.CLAIR_REAL_WLLAMA_HIGH_PERFORMANCE==='1' ? ['--force-high-performance-gpu'] : []
+  const context=await chromium.launchPersistentContext(profile,{channel:'msedge',viewport:{width:1440,height:1050},args})
   const page=context.pages()[0]??await context.newPage()
   const unexpected:string[]=[]
   page.on('pageerror',error=>console.error(error.message))
@@ -60,9 +62,31 @@ test('Wllama CPU dans Clair, citations, comparaison locale et arrêt',async({req
     await page.getByLabel('Format de réponse').selectOption('réponse courte')
     const question=page.getByRole('textbox',{name:'Votre question'})
 
-    for (const engine of ['wllama','llamacpp']) {
+    if (withGPU) {
+      await expect(models.locator('option[value="qwen3-4b:wllama-webgpu"]')).toHaveText('Qwen3 4B · Wllama (WebGPU)')
+      const adapter=await page.evaluate(async()=>{
+        const gpu=(navigator as Navigator&{gpu?:{requestAdapter():Promise<{info:{vendor:string;architecture:string;description:string}}|null>}}).gpu
+        const info=(await gpu?.requestAdapter())?.info
+        return info ? {vendor:info.vendor,architecture:info.architecture,description:info.description} : null
+      })
+      expect(adapter).not.toBeNull()
+      await writeFile(testInfo.outputPath('edge-webgpu-adapter.json'),JSON.stringify(adapter,null,2)+'\n')
+      // Use one cache for the CPU and WebGPU measurements, primed outside the comparison.
+      await models.selectOption('qwen3-4b:wllama')
+      await question.fill('Quel est le nom du projet ?')
+      await page.getByRole('button',{name:'Envoyer la question'}).click()
+      const warmup=page.locator('.exchange').last().getByText('· Wllama CPU')
+      const error=page.getByRole('alert')
+      await expect(warmup.or(error)).toBeVisible({timeout:120000})
+      if (await error.isVisible()) throw Error(await error.innerText())
+      await expect(page.getByRole('button',{name:'Arrêter la réponse'})).toHaveCount(0)
+    }
+
+    const engines=withGPU ? ['wllama-webgpu','wllama','llamacpp'] : ['wllama','llamacpp']
+    for (const engine of engines) {
       await models.selectOption('qwen3-4b:'+engine)
-      const tag=engine==='wllama'?'Wllama CPU':'llama.cpp CPU'
+      const gpu=engine==='wllama-webgpu'
+      const tag=gpu ? 'Wllama WebGPU' : engine==='wllama' ? 'Wllama CPU' : 'llama.cpp CPU'
       for (const task of ['question','résumé']) {
         const length=(await getHistory()).length
         const stopSampling=sampleMemory(basename(profile),engine==='llamacpp')
@@ -81,8 +105,9 @@ test('Wllama CPU dans Clair, citations, comparaison locale et arrêt',async({req
           await expect(answer.locator('.sources button').first()).toBeVisible()
           if (task==='question') await expect(answer).toContainText(/240[ \u00a0\u202f]?000/)
           await expect(page.getByRole('button',{name:'Arrêter la réponse'})).toHaveCount(0)
-          if (engine==='wllama'&&task==='question') {
-            await page.screenshot({path:testInfo.outputPath('clair-wllama-cpu.png')})
+          if (engine!=='llamacpp'&&task==='question') {
+            if (gpu) await expect(answer.getByText(/\d+\/\d+ couches GPU/)).toBeVisible()
+            await page.screenshot({path:testInfo.outputPath(gpu?'clair-wllama-webgpu.png':'clair-wllama-cpu.png')})
             await answer.locator('.sources button').first().click()
             await expect(page.locator('.source-panel')).toContainText(/240[ \u00a0\u202f]?000/)
             await page.getByRole('button',{name:'Fermer la source'}).click()
@@ -93,7 +118,11 @@ test('Wllama CPU dans Clair, citations, comparaison locale et arrêt',async({req
         const history=await getHistory()
         expect(history).toHaveLength(length+1)
         const answer=history.at(-1)
-        expect(answer.metrics).toMatchObject({runtime:engine,device:'cpu'})
+        expect(answer.metrics).toMatchObject({runtime:gpu?'wllama':engine,device:gpu?'gpu':'cpu',model:'qwen3-4b:'+engine})
+        if (gpu) {
+          expect(answer.metrics.gpu_layers).toBeGreaterThan(0)
+          expect(answer.metrics.gpu_layers).toBeLessThanOrEqual(answer.metrics.total_layers)
+        }
         expect(answer.answer).toMatch(/\[S\d+\]/)
         expect(answer.metrics.model_calls).toBeGreaterThan(0)
         if (task==='résumé') expect(answer.metrics.strategy).toBe('fast')
@@ -102,14 +131,16 @@ test('Wllama CPU dans Clair, citations, comparaison locale et arrêt',async({req
       }
     }
 
-    await models.selectOption('qwen3-4b:wllama')
+    const finished=(await getHistory()).length
+    await models.selectOption(withGPU?'qwen3-4b:wllama-webgpu':'qwen3-4b:wllama')
     await question.fill('Comment le budget de 2027 se répartit-il entre chaque poste ?')
     await page.getByRole('button',{name:'Envoyer la question'}).click()
-    await expect(page.getByText('Wllama lit les passages et rédige sur CPU…')).toBeVisible({timeout:45000})
+    const generating=withGPU ? /Wllama rédige avec WebGPU/ : 'Wllama lit les passages et rédige sur CPU…'
+    await expect(page.getByText(generating)).toBeVisible({timeout:45000})
     await page.getByRole('button',{name:'Arrêter la réponse'}).click()
     await expect.poll(async()=>(await (await request.get('/api/health')).json()).busy).toBe(false)
     await expect(models).toBeEnabled()
-    expect(await getHistory()).toHaveLength(4)
+    expect(await getHistory()).toHaveLength(finished)
     expect(unexpected).toEqual([])
     await writeFile(testInfo.outputPath('comparison.json'),JSON.stringify(report,null,2)+'\n')
   } finally {

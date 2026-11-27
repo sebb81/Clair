@@ -1,5 +1,20 @@
 # Validation actuelle et limites connues
 
+## Wllama WebGPU dans Edge
+
+Sur le PC de développement, Edge lancé en mode haute performance a utilisé la RTX 4080 Laptop. Wllama 4.0.0 a confirmé 37 couches sur 37 chargées sur le GPU et a terminé les deux réponses avec des citations cliquables. L’arrêt d'une troisième génération a libéré le calcul sans ajouter de réponse incomplète.
+
+Les trois moteurs ont traité une question budgétaire et un résumé rapide du document Horizon, avec le même GGUF Qwen3 4B Q4_K_M, le même contexte de 3 072 tokens et 8 threads. Le fichier était déjà en cache disque dans Edge pour les deux modes Wllama. Chaque valeur correspond à une seule exécution.
+
+| Temps total | Wllama WebGPU | Wllama CPU | llama.cpp CPU |
+| --- | ---: | ---: | ---: |
+| Question, 412 tokens d’entrée | 13,24 s | 41,91 s | 10,89 s |
+| Résumé rapide, 608 tokens d’entrée | 11,26 s | 59,57 s | 15,88 s |
+
+La question a produit 85 tokens sur les trois moteurs. Le résumé a produit 112 tokens avec Wllama et 127 avec llama.cpp. Pour reproduire la comparaison, activez `CLAIR_REAL_WLLAMA_TEST=1`, `CLAIR_REAL_WLLAMA_WEBGPU=1` et `CLAIR_REAL_WLLAMA_HIGH_PERFORMANCE=1` sur une bibliothèque de validation, puis lancez `npx playwright test tests/wllama-real.spec.ts` depuis `web`.
+
+Avec l’adaptateur Intel intégré choisi par défaut par Edge, le premier essai s’est interrompu au décodage. La même question a ensuite abouti avec 37 couches sur 37 après réduction de la taille des lots WebGPU. Cet essai a pris 74,88 s, première copie du GGUF comprise. Le Dell reste à tester.
+
 ## Wllama CPU dans Edge
 
 Wllama 4.0.0 et llama.cpp natif ont traité la même question budgétaire et le même résumé rapide dans Clair, sur le document Horizon. Le modèle était le même fichier Qwen3 4B Q4_K_M, avec 3 072 tokens de contexte et 8 threads. Les deux moteurs ont utilisé respectivement 412 et 608 tokens d'entrée pour les deux tâches. Chaque cas a été mesuré une fois sur le PC de développement.

@@ -109,6 +109,7 @@ def health():
             'installed': llamacpp.weights_installed()}
     return {'mode': 'webnn', 'webnn': recommended, 'webnn_models': models,
             'llamacpp_model': native, 'wllama_model': wasm,
+            'wllama_webgpu_model': {**wasm, 'model': wllama.WEBGPU_MODEL},
             'recommended_model': recommended['model'] if recommended else None,
             'busy': compute_lock.locked() or import_lock.locked(), 'max_upload_mb': settings.max_upload_mb}
 
@@ -158,6 +159,8 @@ class BrowserResult(BaseModel):
 class WllamaResult(BrowserResult):
     threads: int = Field(default=1, ge=1, le=8)
     generation_ms: float = Field(default=0, ge=0)
+    gpu_layers: int = Field(default=0, ge=0)
+    total_layers: int = Field(default=0, ge=0)
 
 
 @app.post('/api/wllama/results/{request_id}')
@@ -345,10 +348,10 @@ async def ask(doc: str, body: Question):
                 await operation(events)
 
         return await compute_response(events, run)
-    if body.model == wllama.MODEL:
+    if body.model in wllama.DEVICES:
         if not llamacpp.weights_installed():
             raise HTTPException(400, 'Installez le GGUF avec python -m scripts.benchmark_cpu --install-gguf.')
-        return await browser_job(webnn.Browser('cpu', wllama.MODEL, wllama.CONTEXT),
+        return await browser_job(webnn.Browser(wllama.DEVICES[body.model], body.model, wllama.CONTEXT),
                                  lambda browser: operation(browser.events))
     return await browser_response(body.model, body.webnn_device, lambda browser: operation(browser.events))
 
